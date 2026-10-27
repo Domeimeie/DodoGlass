@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mermaid Viewer</title>
+<style>
+  :root {
+    --bg: #f7f7f8; --panel: #ffffff; --fg: #1d1d1f; --muted: #6b6b72;
+    --border: #dcdce0; --accent: #3b6ef5; --error: #c62828;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151517; --panel: #1e1e21; --fg: #ececf0; --muted: #9a9aa3;
+      --border: #333338; --accent: #7c9cff; --error: #ff6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.4 system-ui, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  header h1 { font-size: 15px; margin: 0 auto 0 0; }
+  button, label.btn {
+    font: inherit; color: var(--fg); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; cursor: pointer;
+  }
+  button:hover, label.btn:hover { border-color: var(--accent); }
+  main { flex: 1; display: grid; grid-template-columns: 1fr 1.4fr; min-height: 0; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; grid-template-rows: 40vh 1fr; } }
+  textarea {
+    width: 100%; height: 100%; resize: none; border: 0; outline: 0; padding: 16px;
+    background: var(--panel); color: var(--fg); border-right: 1px solid var(--border);
+    font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace; tab-size: 4;
+  }
+  #preview { overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 24px; align-items: center; }
+  #preview svg { max-width: 100%; height: auto; }
+  #error {
+    display: none; white-space: pre-wrap; color: var(--error);
+    font: 12px/1.4 ui-monospace, monospace; padding: 8px 16px;
+    border-top: 1px solid var(--border); background: var(--panel);
+  }
+  .hint { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Mermaid Viewer</h1>
+  <span class="hint">Paste Mermaid or a Markdown file with ```mermaid blocks</span>
+  <label class="btn">Open file<input type="file" id="file" accept=".md,.mmd,.mermaid,.txt" hidden></label>
+  <button id="export">Export SVG</button>
+</header>
+<main>
+  <textarea id="src" spellcheck="false"></textarea>
+  <div id="preview"></div>
+</main>
+<div id="error"></div>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs";
+
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  mermaid.initialize({ startOnLoad: false, theme: dark ? "dark" : "default", suppressErrorRendering: true });
+
+  const src = document.getElementById("src");
+  const preview = document.getElementById("preview");
+  const errorBox = document.getElementById("error");
+  const STORAGE_KEY = "mermaid-viewer-src";
+
+  const SAMPLE = `flowchart TB
+    subgraph Frontend
+        Web[Web]
+        Mobile[Mobile]
+    end
+    Backend[Backend]
+    Scheduler[Scheduler]
+    subgraph Database[database]
+        Indexes[(indexes)]
+    end
+    subgraph Indexing["API Components (indexing)"]
+        MovieDB[movieDB]
+        IMDb[IMDb]
+    end
+    Web -->|HTTP API| Backend
+    Mobile -->|HTTP API| Backend
+    Backend -->|read / write| Database
+    Scheduler -->|read pending work / write metadata| Database
+    Scheduler -->|fetch metadata| Indexing`;
+
+  // A Markdown document yields its ```mermaid blocks; anything else is one diagram.
+  function extractDiagrams(text) {
+    const blocks = [...text.matchAll(/```mermaid\s*\n([\s\S]*?)```/g)].map(m => m[1]);
+    return blocks.length ? blocks : [text];
+  }
+
+  let renderSeq = 0;
+  async function render() {
+    const seq = ++renderSeq;
+    const diagrams = extractDiagrams(src.value).filter(d => d.trim());
+    const svgs = [];
+    const errors = [];
+    for (const [i, code] of diagrams.entries()) {
+      try {
+        await mermaid.parse(code);
+        const { svg } = await mermaid.render(`m${seq}_${i}`, code);
+        svgs.push(svg);
+      } catch (e) {
+        errors.push((diagrams.length > 1 ? `Diagram ${i + 1}: ` : "") + (e?.message ?? e));
+      }
+    }
+    if (seq !== renderSeq) return; // a newer render started meanwhile
+    preview.innerHTML = svgs.join("");
+    errorBox.textContent = errors.join("\n\n");
+    errorBox.style.display = errors.length ? "block" : "none";
+  }
+
+  let timer;
+  src.addEventListener("input", () => {
+    try { localStorage.setItem(STORAGE_KEY, src.value); } catch {}
+    clearTimeout(timer);
+    timer = setTimeout(render, 300);
+  });
+
+  src.addEventListener("keydown", e => {
+    if (e.key !== "Tab") return;
+    e.preventDefault();
+    src.setRangeText("    ", src.selectionStart, src.selectionEnd, "end");
+    src.dispatchEvent(new Event("input"));
+  });
+
+  async function loadFile(file) {
+    src.value = await file.text();
+    src.dispatchEvent(new Event("input"));
+  }
+  document.getElementById("file").addEventListener("change", e => {
+    if (e.target.files[0]) loadFile(e.target.files[0]);
+  });
+  document.addEventListener("dragover", e => e.preventDefault());
+  document.addEventListener("drop", e => {
+    e.preventDefault();
+    if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+  });
+
+  document.getElementById("export").addEventListener("click", () => {
+    preview.querySelectorAll("svg").forEach((svg, i, all) => {
+      const blob = new Blob([svg.outerHTML], { type: "image/svg+xml" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = all.length > 1 ? `diagram-${i + 1}.svg` : "diagram.svg";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
+  });
+
+  let saved = null;
+  try { saved = localStorage.getItem(STORAGE_KEY); } catch {}
+  src.value = saved || SAMPLE;
+  render();
+</script>
+</body>
+</html>

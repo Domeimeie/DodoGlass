@@ -1,0 +1,16 @@
+version: '3'
+
+vars:
+  MKDOCS: uvx --from 'mkdocs<2' --with pymdown-extensions mkdocs
+  PORT: '{{.PORT | default "8001"}}'
+
+tasks:
+  serve:
+    desc: Serve the docs with live reload (override port with PORT=...)
+    cmds:
+      - '{{.MKDOCS}} serve -a 127.0.0.1:{{.PORT}}'
+
+  build:
+    desc: Build the static docs site into docs/site
+    cmds:
+      - '{{.MKDOCS}} build --strict'

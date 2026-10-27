@@ -1,0 +1,9 @@
+version: '3'
+
+includes:
+  docs:
+    taskfile: ./docs
+    dir: ./docs
+  transcoder:
+    taskfile: ./application/transcoder
+    dir: ./application/transcoder

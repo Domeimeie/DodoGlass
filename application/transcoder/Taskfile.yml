@@ -1,0 +1,118 @@
+version: '3'
+
+tasks:
+  build:
+    desc: Debug build
+    cmds:
+      - cargo build
+
+  release:
+    desc: Optimized build in target/release/transcoder
+    cmds:
+      - cargo build --release
+
+  run:
+    desc: 'Run with arguments, e.g. go-task run -- sample.mp4 -f hls'
+    interactive: true
+    cmds:
+      - cargo run -- {{.CLI_ARGS}}
+
+  serve:
+    desc: 'Run as a service on the mock PubSub, e.g. go-task serve -- -t 2'
+    cmds:
+      - cargo run -- --service {{.CLI_ARGS}}
+
+  publish:
+    desc: 'Publish demo tasks to the mock PubSub, e.g. go-task publish -- samples --follow'
+    cmds:
+      - python3 scripts/publish_task.py {{.CLI_ARGS}}
+
+  status:
+    desc: Follow the mock PubSub status channel
+    interactive: true
+    cmds:
+      - mkdir -p mock-pubsub && touch mock-pubsub/transcode.status.jsonl
+      - tail -f mock-pubsub/transcode.status.jsonl
+
+  sample:
+    desc: Create a 30 s 1080p test video (sample.mp4)
+    status:
+      - test -f sample.mp4
+    cmds:
+      - >-
+        ffmpeg -hide_banner -y
+        -f lavfi -i testsrc2=size=1920x1080:rate=24:duration=30
+        -f lavfi -i sine=frequency=440:duration=30
+        -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest sample.mp4
+
+  samples:
+    desc: Create a folder of varied test videos in samples/ (existing files are kept)
+    vars:
+      # -n: never overwrite, so re-running only creates missing files
+      FF: ffmpeg -hide_banner -loglevel error -n
+      X264: -c:v libx264 -preset veryfast -pix_fmt yuv420p
+      AAC: -c:a aac -shortest
+    cmds:
+      - mkdir -p samples
+      # Standard 1080p, 24 fps, colour bars
+      - >-
+        {{.FF}} -f lavfi -i smptehdbars=size=1920x1080:rate=24:duration=20
+        -f lavfi -i sine=frequency=440:duration=20
+        {{.X264}} {{.AAC}} samples/bars_1080p24.mp4 || true
+      # Constant fine detail: hard to compress, low bitrates look visibly worse
+      - >-
+        {{.FF}} -f lavfi -i mandelbrot=size=1280x720:rate=30
+        -f lavfi -i sine=frequency=330:duration=15 -t 15
+        {{.X264}} {{.AAC}} samples/mandelbrot_720p30.mp4 || true
+      # 60 fps source
+      - >-
+        {{.FF}} -f lavfi -i testsrc2=size=1920x1080:rate=60:duration=10
+        -f lavfi -i sine=frequency=550:duration=10
+        {{.X264}} {{.AAC}} samples/motion_1080p60.mp4 || true
+      # No audio track, and smaller than most renditions (upscaling)
+      - >-
+        {{.FF}} -f lavfi -i life=size=854x480:rate=25:mold=10:ratio=0.3:death_color=#202040:life_color=#40e0d0 -t 20
+        {{.X264}} samples/life_480p25_noaudio.mp4 || true
+      # Vertical phone video
+      - >-
+        {{.FF}} -f lavfi -i testsrc2=size=1080x1920:rate=30:duration=12
+        -f lavfi -i sine=frequency=660:duration=12
+        {{.X264}} {{.AAC}} samples/portrait_1080x1920.mp4 || true
+      # Larger than 1080p, smooth gradients (shows banding at low bitrates)
+      - >-
+        {{.FF}} -f lavfi -i gradients=size=2560x1440:rate=24:speed=0.02:duration=10
+        -f lavfi -i sine=frequency=220:duration=10
+        {{.X264}} {{.AAC}} samples/gradients_1440p24.mp4 || true
+
+  test:
+    desc: Run the tests
+    cmds:
+      - cargo test
+
+  lint:
+    desc: Clippy, with warnings treated as errors
+    cmds:
+      - cargo clippy --all-targets -- -D warnings
+
+  fmt:
+    desc: Format the code
+    cmds:
+      - cargo fmt
+
+  check:
+    desc: Formatting check, lint and tests
+    cmds:
+      - cargo fmt --check
+      - task: lint
+      - task: test
+
+  install:
+    desc: Install as the `transcoder` command in ~/.cargo/bin
+    cmds:
+      - cargo install --path .
+
+  clean:
+    desc: Remove build artefacts, out/ and the mock PubSub folder
+    cmds:
+      - cargo clean
+      - rm -rf out mock-pubsub

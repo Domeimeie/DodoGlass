@@ -1,0 +1,47 @@
+# Transcoding config: one entry per quality version ("rendition").
+# The player picks between them depending on the viewer's connection.
+
+# Length of each segment in seconds. A keyframe is forced at every
+# segment boundary so all renditions can be cut at the same moments.
+segment_duration = 4
+
+# x264 speed/quality trade-off: ultrafast, veryfast, fast, medium, slow, ...
+preset = "veryfast"
+
+# Audio bitrate in kbit/s (AAC, stereo).
+audio_bitrate_kbps = 128
+
+# Optional frame rate for every rendition, e.g. 30 or 23.976.
+# Without it, each rendition keeps the source's frame rate.
+# fps = 30
+
+# height:       picture height in pixels, width follows the source's aspect ratio
+# bitrate_kbps: average video bitrate in kbit/s
+# maxrate_kbps: optional peak cap (default: bitrate + 7 %)
+# bufsize_kbps: optional rate-control buffer (default: 1.5 x bitrate)
+# fps:          optional frame rate for this rendition only (overrides the one above)
+
+[[rendition]]
+name = "1080p_5000kbs"
+height = 1080
+bitrate_kbps = 5000
+
+[[rendition]]
+name = "1080p_1000kbs"
+height = 1080
+bitrate_kbps = 1000
+
+[[rendition]]
+name = "720p"
+height = 720
+bitrate_kbps = 2800
+
+[[rendition]]
+name = "480p"
+height = 480
+bitrate_kbps = 1400
+
+[[rendition]]
+name = "360p"
+height = 360
+bitrate_kbps = 800
