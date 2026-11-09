@@ -6,6 +6,8 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::ffmpeg::{if_match_header, is_url, redact};
+
 #[derive(Debug, Clone)]
 pub struct SourceInfo {
     pub duration: f64,
@@ -41,26 +43,33 @@ struct Stream {
     avg_frame_rate: Option<String>,
 }
 
-pub fn probe(input: &Path) -> Result<SourceInfo> {
-    if !input.is_file() {
-        bail!("input file {} does not exist", input.display());
+/// `input` is a file path or an http(s) URL. For a URL ffprobe only fetches
+/// the parts of the file it needs to read the headers; with `etag`, only from
+/// that version of the object.
+pub fn probe(input: &str, etag: Option<&str>) -> Result<SourceInfo> {
+    if !is_url(input) && !Path::new(input).is_file() {
+        bail!("input file {input} does not exist");
     }
-    let out = Command::new("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-print_format",
-            "json",
-            "-show_format",
-            "-show_streams",
-        ])
+    let mut command = Command::new("ffprobe");
+    command.args([
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+    ]);
+    if let (true, Some(etag)) = (is_url(input), etag) {
+        command.args(["-headers", &if_match_header(etag)]);
+    }
+    let out = command
         .arg(input)
         .output()
         .context("could not start ffprobe (is ffmpeg installed?)")?;
     if !out.status.success() {
         bail!(
             "ffprobe failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            redact(String::from_utf8_lossy(&out.stderr).trim())
         );
     }
     let parsed: Output =

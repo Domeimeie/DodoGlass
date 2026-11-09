@@ -11,7 +11,7 @@ use tokio::sync::Semaphore;
 use tokio::sync::mpsc::UnboundedSender as Sender;
 use tokio::task::JoinSet;
 
-use crate::ffmpeg::Job;
+use crate::ffmpeg::{Job, OutDir, redact};
 
 /// How a job ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,8 +92,9 @@ pub async fn run_job(
     cancel: &AtomicBool,
     own_process_group: bool,
 ) -> Outcome {
-    if let Some(dir) = job.manifest.parent() {
-        // Start clean so old segments from an earlier run don't mix in.
+    // Start clean so old segments from an earlier run don't mix in. (For
+    // uploads to a bucket the service clears the old output before the job.)
+    if let OutDir::Local(dir) = &job.dir {
         let _ = fs::remove_dir_all(dir);
         if let Err(e) = fs::create_dir_all(dir) {
             return Outcome::Failed(format!("cannot create {}: {e}", dir.display()));
@@ -140,7 +141,7 @@ pub async fn run_job(
                 if !line.is_empty() {
                     let _ = log_tx.send(Event::Log {
                         job: index,
-                        line: line.to_string(),
+                        line: redact(line).into_owned(),
                     });
                 }
             }

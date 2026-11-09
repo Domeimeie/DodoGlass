@@ -12,7 +12,7 @@ Setting it up on a new machine: see [Setup](setup.md). Files: `infra/` in the re
 |---|---|---|---|
 | Object storage | [RustFS](https://github.com/rustfs/rustfs) 1.0.4 | Stores the videos in buckets; S3-compatible API. Plays the **Media storage** of the [system architecture](architecture.md) | `9000` S3 API, `9001` web console |
 | MQTT broker | [Eclipse Mosquitto](https://mosquitto.org) 2.1.2 | Passes messages from publishers to subscribers by topic | `1883` |
-| Setup job | AWS CLI 2.39.5 | Runs once on start: creates the buckets and the event rule, then exits | – |
+| Setup job | AWS CLI 2.39.5 | Runs once on start: creates the buckets and the event rule, then exits. Also used by `go-task infra:upload` / `infra:ls` | – |
 | Transcoder | ours, native | Subscribes to new-video events, transcodes, writes the result back | – |
 
 ### Terms
@@ -53,8 +53,8 @@ flowchart LR
 
 `final` deliberately has no event rule: otherwise the transcoder's own output would trigger new jobs.
 
-Status: steps 1 and 2 are set up and tested. Step 3 (the MQTT client in the transcoder, reading from
-and writing to RustFS) is the next stage.
+All three steps are built and tested. How the transcoder does step 3 without storing the video on
+its own disk: [Transcoder](transcoder.md#inputs-and-outputs-in-buckets) and [Efficiency](efficiency.md).
 
 ## Networking
 
@@ -187,10 +187,10 @@ Findings:
 
 ## Open points
 
-- **One task, one worker.** MQTT delivers a message to *every* subscriber of a topic. With two
-  transcoders running, both would transcode the same video. Solution for the next stage: a shared
-  subscription (`$share/<group>/dodoglass/ingest`), where the broker gives each message to only one
-  member of the group.
+- **One task, one worker** (solved). MQTT delivers a message to *every* subscriber of a topic, so two
+  transcoders would both transcode the same video. The transcoder subscribes to the shared
+  subscription `$share/transcoders/dodoglass/ingest` instead: the broker gives each message to only
+  one member of the group.
 - **Credentials.** `rustfsadmin`/`rustfsadmin` are RustFS's public defaults, and Mosquitto allows
   anonymous clients. Fine on a developer machine; a real deployment would use secrets from the
   environment and a broker with login and TLS.

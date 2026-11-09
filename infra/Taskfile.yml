@@ -34,3 +34,24 @@ tasks:
     interactive: true
     cmds:
       - docker compose exec mosquitto mosquitto_sub -t 'dodoglass/#' -v
+
+  upload:
+    desc: 'Upload a video to the ingest bucket, e.g. go-task infra:upload -- application/transcoder/sample.mp4'
+    cmds:
+      # Streams the file through stdin into the AWS CLI container (no local S3 client, no mount).
+      - |
+        f="{{.CLI_ARGS}}"
+        case "$f" in /*) ;; *) f="{{.USER_WORKING_DIR}}/$f" ;; esac
+        test -f "$f" || { echo "no such file: $f" >&2; exit 1; }
+        docker compose run --rm -T --no-deps --entrypoint aws init \
+          s3 cp - "s3://ingest/$(basename "$f")" < "$f"
+        echo "uploaded $(basename "$f") to s3://ingest/"
+
+  ls:
+    desc: 'List a bucket, e.g. go-task infra:ls -- final (default: both buckets)'
+    cmds:
+      - |
+        for b in {{.CLI_ARGS | default "ingest final"}}; do
+          echo "== s3://$b"
+          docker compose run --rm -T --no-deps --entrypoint aws init s3 ls --recursive --human-readable "s3://$b/"
+        done

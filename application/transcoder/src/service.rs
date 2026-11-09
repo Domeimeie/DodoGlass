@@ -1,7 +1,7 @@
 //! Unattended service mode: register on PubSub, take tasks, transcode them,
 //! publish status. Logs go to stdout through `tracing`; there is no TUI.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
@@ -9,18 +9,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use crate::config::Config;
-use crate::ffmpeg::{self, Format, Video};
+use crate::ffmpeg::{self, Format, OutDir, Video};
 use crate::probe;
-use crate::pubsub::{
-    PubSub, Publisher, STATUS_CHANNEL, StatusEvent, StatusMessage, TASK_CHANNEL, Task, WorkerInfo,
-    now_ms,
-};
+use crate::pubsub::{Input, PubSub, Publisher, StatusEvent, StatusMessage, Task, WorkerInfo, now_ms};
 use crate::runner::{self, Event, Outcome};
+use crate::storage::Storage;
+use crate::upload::UploadServer;
 
 /// How many of ffmpeg's last log lines to keep for the error message of a failed job.
 const STDERR_TAIL: usize = 15;
@@ -28,17 +28,65 @@ const STDERR_TAIL: usize = 15;
 pub struct Settings {
     pub worker_id: String,
     pub config: Config,
-    pub out_dir: PathBuf,
+    pub output: Output,
+    /// Needed for tasks whose input is an object in a bucket.
+    pub storage: Option<Arc<Storage>>,
     pub formats: Vec<Format>,
     /// How many tasks run at the same time.
     pub slots: usize,
+}
+
+/// Where results go.
+pub enum Output {
+    /// `<dir>/<task id>/`
+    Local(PathBuf),
+    /// `s3://<bucket>/<task id>/`, uploaded file by file while ffmpeg runs.
+    Bucket(UploadServer),
+}
+
+impl Output {
+    fn dir_for(&self, task_id: &str) -> OutDir {
+        match self {
+            Output::Local(dir) => OutDir::Local(dir.join(task_id)),
+            Output::Bucket(uploads) => OutDir::Http {
+                url: uploads.url_for(task_id),
+                shown: format!("s3://{}/{task_id}", uploads.bucket()),
+            },
+        }
+    }
 }
 
 /// Shared by every task handler.
 struct Context {
     settings: Settings,
     cancel: AtomicBool,
+    /// One lock per task id (= output folder): a second task for the same
+    /// video waits until the first is finished instead of overwriting it.
+    running_ids: std::sync::Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
 }
+
+impl Context {
+    fn lock_for(&self, id: &str) -> Arc<AsyncMutex<()>> {
+        let mut ids = self.running_ids.lock().expect("lock poisoned");
+        // Forget locks nobody holds any more, so the map doesn't grow forever.
+        ids.retain(|_, lock| Arc::strong_count(lock) > 1);
+        ids.entry(id.to_string()).or_default().clone()
+    }
+}
+
+/// Written to `<output>/<task id>/source.json` after a task completed: which
+/// version of which input the output was made from. A new event for the same
+/// version (same eTag) and formats is then skipped.
+#[derive(Debug, Serialize, Deserialize)]
+struct SourceMarker {
+    input: String,
+    etag: String,
+    formats: Vec<Format>,
+    completed_ms: u64,
+    worker: String,
+}
+
+const SOURCE_MARKER: &str = "source.json";
 
 /// Runs until SIGTERM / Ctrl+C. The first signal stops taking tasks and lets
 /// running ones finish; a second one cancels them.
@@ -54,8 +102,6 @@ pub async fn run<P: PubSub>(mut pubsub: P, settings: Settings) -> Result<()> {
     info!(
         worker = %worker.id,
         slots = worker.slots,
-        tasks = TASK_CHANNEL,
-        status = STATUS_CHANNEL,
         "worker registered, waiting for tasks"
     );
 
@@ -64,6 +110,7 @@ pub async fn run<P: PubSub>(mut pubsub: P, settings: Settings) -> Result<()> {
     let ctx = Arc::new(Context {
         settings,
         cancel: AtomicBool::new(false),
+        running_ids: Default::default(),
     });
     let mut running = JoinSet::new();
     let mut shutdown = pin!(shutdown_signal());
@@ -150,11 +197,64 @@ async fn handle_task<P: Publisher + Clone>(
         }
     };
     let started = Instant::now();
-    info!(input = %task.input.display(), "task accepted");
+    info!(input = %task.input, "task accepted");
     publish(status(StatusEvent::Accepted)).await;
 
-    let input = task.input.clone();
-    let source = match tokio::task::spawn_blocking(move || probe::probe(&input)).await {
+    // The same video (task id) at most once at a time. Waiting keeps the slot.
+    let id_lock = ctx.lock_for(&task.id);
+    let _same_id = match id_lock.clone().try_lock_owned() {
+        Ok(guard) => guard,
+        Err(_) => {
+            info!("waiting: this video is already being transcoded");
+            id_lock.lock_owned().await
+        }
+    };
+    let formats = task.formats.clone().unwrap_or_else(|| s.formats.clone());
+    let marker_key = format!("{}/{SOURCE_MARKER}", task.id);
+
+    // Unchanged re-upload (same eTag, same formats): nothing to do.
+    if let (Output::Bucket(uploads), Some(storage), Input::Object { etag: Some(etag), .. }) =
+        (&s.output, &s.storage, &task.input)
+    {
+        match storage.get_small(uploads.bucket(), &marker_key).await {
+            Ok(Some(json)) => match serde_json::from_slice::<SourceMarker>(&json) {
+                Ok(m) if m.etag == *etag && m.formats == formats => {
+                    info!(%etag, "unchanged since the last transcode, skipped");
+                    return publish(status(StatusEvent::Skipped)).await;
+                }
+                Ok(_) => info!("new version of this video: replacing the earlier output"),
+                Err(e) => warn!(error = %e, "ignoring unreadable {SOURCE_MARKER}"),
+            },
+            Ok(None) => {}
+            Err(e) => warn!(error = format!("{e:#}"), "cannot read {SOURCE_MARKER}"),
+        }
+    }
+
+    // What ffmpeg opens. For an object: a presigned URL, so ffmpeg streams the
+    // video straight from the storage; nothing is downloaded first.
+    let input = match &task.input {
+        Input::File(path) => path.display().to_string(),
+        Input::Object { bucket, key, .. } => {
+            let Some(storage) = &s.storage else {
+                let reason = "the input is in a bucket, but no S3 storage is configured".into();
+                return fail(&publish, status(StatusEvent::Failed), reason).await;
+            };
+            match storage.read_url(bucket, key).await {
+                Ok(url) => url,
+                Err(e) => {
+                    return fail(&publish, status(StatusEvent::Failed), format!("{e:#}")).await;
+                }
+            }
+        }
+    };
+
+    let input_etag = match &task.input {
+        Input::Object { etag, .. } => etag.clone(),
+        Input::File(_) => None,
+    };
+    let (probe_input, probe_etag) = (input.clone(), input_etag.clone());
+    let probed = tokio::task::spawn_blocking(move || probe::probe(&probe_input, probe_etag.as_deref()));
+    let source = match probed.await {
         Ok(Ok(source)) => source,
         Ok(Err(e)) => return fail(&publish, status(StatusEvent::Failed), format!("{e:#}")).await,
         Err(e) => return fail(&publish, status(StatusEvent::Failed), e.to_string()).await,
@@ -169,13 +269,20 @@ async fn handle_task<P: Publisher + Clone>(
     );
 
     let video = Video {
-        path: task.input.clone(),
+        input,
+        input_etag: input_etag.clone(),
         name: task.id.clone(),
-        out_dir: s.out_dir.join(&task.id),
+        out_dir: s.output.dir_for(&task.id),
         source: Ok(source.clone()),
     };
-    let formats = task.formats.clone().unwrap_or_else(|| s.formats.clone());
     let jobs = ffmpeg::build_jobs(0, &video, &source, &s.config, &formats);
+
+    // From here on the earlier output is replaced: it no longer matches the marker.
+    if let (Output::Bucket(uploads), Some(storage)) = (&s.output, &s.storage)
+        && let Err(e) = storage.delete(uploads.bucket(), &marker_key).await
+    {
+        return fail(&publish, status(StatusEvent::Failed), format!("{e:#}")).await;
+    }
 
     for (index, job) in jobs.iter().enumerate() {
         let label = job.format.label();
@@ -183,6 +290,20 @@ async fn handle_task<P: Publisher + Clone>(
             let mut m = status(StatusEvent::Failed);
             m.format = Some(label);
             return fail(&publish, m, "cancelled before starting".into()).await;
+        }
+        // In a bucket, remove an earlier run's output first (on disk the runner does it).
+        let prefix = format!("{}/{}", task.id, job.format.dir_name());
+        if let (Output::Bucket(uploads), Some(storage)) = (&s.output, &s.storage) {
+            match storage.delete_prefix(uploads.bucket(), &prefix).await {
+                Ok(0) => {}
+                Ok(n) => info!(format = label, deleted = n, "removed earlier output"),
+                Err(e) => {
+                    let mut m = status(StatusEvent::Failed);
+                    m.format = Some(label);
+                    return fail(&publish, m, format!("{e:#}")).await;
+                }
+            }
+            uploads.take_stats(&prefix);
         }
         info!(format = label, "job started");
         let mut m = status(StatusEvent::JobStarted);
@@ -231,6 +352,26 @@ async fn handle_task<P: Publisher + Clone>(
         };
 
         let took_s = format!("{:.1}", job_started.elapsed().as_secs_f64());
+        // ffmpeg does not always stop when an upload fails, so check.
+        let mut outcome = outcome;
+        if let Output::Bucket(uploads) = &s.output {
+            let stats = uploads.take_stats(&prefix);
+            if outcome == Outcome::Done && stats.failed > 0 {
+                outcome = Outcome::Failed(format!(
+                    "{} of {} uploads failed, last: {}",
+                    stats.failed,
+                    stats.failed + stats.files,
+                    stats.last_error.unwrap_or_default()
+                ));
+            } else if outcome == Outcome::Done {
+                info!(
+                    format = label,
+                    files = stats.files,
+                    uploaded_mb = format!("{:.1}", stats.bytes as f64 / 1e6),
+                    "uploaded"
+                );
+            }
+        }
         match outcome {
             Outcome::Done => {
                 info!(format = label, took_s, manifest = %job.manifest.display(), "job done");
@@ -259,6 +400,20 @@ async fn handle_task<P: Publisher + Clone>(
         }
     }
 
+    if let (Output::Bucket(uploads), Some(storage), Some(etag)) = (&s.output, &s.storage, input_etag) {
+        let marker = SourceMarker {
+            input: task.input.to_string(),
+            etag,
+            formats,
+            completed_ms: now_ms(),
+            worker: s.worker_id.clone(),
+        };
+        let json = serde_json::to_vec_pretty(&marker).unwrap_or_default();
+        if let Err(e) = storage.put(uploads.bucket(), &marker_key, json.into()).await {
+            // The output is complete; only the next identical upload won't be skipped.
+            warn!(error = format!("{e:#}"), "cannot write {SOURCE_MARKER}");
+        }
+    }
     info!(
         took_s = format!("{:.1}", started.elapsed().as_secs_f64()),
         output = %video.out_dir.display(),

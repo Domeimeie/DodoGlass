@@ -1,7 +1,7 @@
 # Transcoder
 
 The transcoder is a Rust command-line program that wraps **ffmpeg**. It takes a video file, or a
-folder of `.mp4` files, plus a transcoding config, and produces **HLS** and **DASH** output with
+folder of `.mp4`, `.mov` and `.mkv` files, plus a transcoding config, and produces **HLS** and **DASH** output with
 several quality levels ("renditions") in one manifest each. Several videos are transcoded in
 parallel. It is the Transcoder of the [system architecture](architecture.md).
 
@@ -10,7 +10,10 @@ It runs in three modes:
 - **Interactive** (TUI): `transcoder samples/`, with a full-screen progress view.
 - **Headless**: the same, with plain text output for scripts.
 - **Service**: `transcoder --service`, an unattended worker that takes tasks from PubSub and
-  publishes status. This is how it runs on the platform, later as a Docker container.
+  publishes status. This is how it runs on the platform, later as a Docker container. With
+  `--pubsub mqtt` and `--output-bucket` it reacts to uploads in the `ingest` bucket and writes the
+  result to the `final` bucket, without ever storing the video on its own disk (see
+  [Efficiency](efficiency.md)).
 
 Source: `application/transcoder/`. Usage is described in its `README.md`.
 
@@ -34,21 +37,27 @@ flowchart TB
             Probe["probe.rs<br/>source metadata"]
             FFmpeg["ffmpeg.rs<br/>build commands"]
             Runner["runner.rs<br/>run jobs on tokio"]
-            PubSub["pubsub/<br/>trait + mock"]
+            PubSub["pubsub/<br/>trait, mock, MQTT"]
+            Storage["storage.rs<br/>S3: signed URLs, uploads"]
+            Upload["upload.rs<br/>local PUT endpoint"]
         end
     end
     Main --> TUI & Headless & Service
     Main --> Config & Probe & FFmpeg & Runner
-    Service --> PubSub
+    Service --> PubSub & Storage & Upload
+    Upload --> Storage
     Ladder[/"ladder.toml"/]
     FFprobeBin[["ffprobe"]]
     FFmpegBin[["ffmpeg × N"]]
-    Broker[("mock-pubsub/<br/>(later: Valkey)")]
-    Out[("out/")]
+    Broker[("mock-pubsub/ or<br/>MQTT broker")]
+    Out[("out/ or<br/>bucket final")]
+    In[("bucket ingest")]
     Config -->|reads| Ladder
     Probe -->|runs| FFprobeBin
     Runner -->|runs| FFmpegBin
-    FFmpegBin -->|writes| Out
+    FFmpegBin -->|writes / PUTs| Out
+    FFmpegBin -.->|reads ranges| In
+    FFmpegBin -->|"PUT (S3 mode)"| Upload
     PubSub <-->|tasks, status| Broker
 ```
 
@@ -62,8 +71,12 @@ flowchart TB
 | `tui.rs` | Full-screen interface (ratatui): overall progress, one row per video, ladder, speed graph, log |
 | `headless.rs` | Plain text progress for scripts and CI |
 | `service.rs` | Service mode: registers on PubSub, takes tasks, runs them, publishes status, shuts down gracefully |
-| `pubsub/mod.rs` | The `PubSub` and `Publisher` traits, and the message types (`Task`, `StatusMessage`, `WorkerInfo`) |
-| `pubsub/mock.rs` | A file-based PubSub for development; Valkey will be a second implementation of the same trait |
+| `pubsub/mod.rs` | The `PubSub` and `Publisher` traits, the message types (`Task`, `Input`, `StatusMessage`, `WorkerInfo`) and `Ack` (acknowledge a message when its task is dropped) |
+| `pubsub/mock.rs` | A file-based PubSub for development |
+| `pubsub/mqtt.rs` | PubSub over MQTT 5: shared subscription to the bucket events, status and worker registration as topics |
+| `pubsub/s3_event.rs` | Turns an S3 bucket notification (as RustFS sends it) into bucket + key + eTag |
+| `storage.rs` | S3 access (`object_store`): presigned read URLs, uploads, deleting old output |
+| `upload.rs` | HTTP endpoint on 127.0.0.1 that ffmpeg PUTs its output to; each file is passed on to the bucket |
 
 ### Data model
 
@@ -154,8 +167,8 @@ argument: tasks arrive over PubSub, status goes back over PubSub, and logs go to
 
 ```mermaid
 sequenceDiagram
-    participant Pub as Publisher<br/>(publish_task.py, later the platform)
-    participant Bus as PubSub<br/>(mock: files)
+    participant Pub as Publisher<br/>(publish_task.py, or RustFS<br/>on upload)
+    participant Bus as PubSub<br/>(mock: files, or MQTT)
     participant Svc as Service<br/>(service.rs)
     participant Run as runner.rs + ffmpeg
 
@@ -183,22 +196,28 @@ sequenceDiagram
 
 ### Channels and messages
 
-| Channel | Direction | Content |
-|---|---|---|
-| `transcode.tasks` | platform → worker | one task per message; each task goes to exactly one worker |
-| `transcode.status` | worker → platform | status messages for every task |
+| Channel (mock) | Topic (MQTT) | Direction | Content |
+|---|---|---|---|
+| `transcode.tasks` | `$share/transcoders/dodoglass/ingest` | storage / platform → worker | one task per message; each task goes to exactly one worker |
+| `transcode.status` | `dodoglass/status` | worker → platform | status messages for every task |
+| `workers/<id>.json` | `dodoglass/workers/<id>` (retained) | worker → platform | registration; removed on exit (MQTT: by the broker's last will on a crash) |
 
-A **task** (JSON):
+A **task** (JSON, mock):
 
 ```json
 {"id": "holiday-2024", "input": "/data/in/holiday.mp4", "formats": ["hls", "dash"]}
+{"id": "holiday-2024", "input": {"bucket": "ingest", "key": "holiday.mp4", "etag": "…"}}
 ```
 
 | Field | Required | Meaning |
 |---|---|---|
 | `id` | no (mock: file name) | unique task name; also the output folder `<out>/<id>`. Letters, digits, `-`, `_`, `.` |
-| `input` | yes | the video, as a path **the service** can read (in a container: a mounted path) |
+| `input` | yes | the video: a path **the service** can read (in a container: a mounted path), or an object in a bucket. Must end in `.mp4`, `.mov` or `.mkv` (any case) |
 | `formats` | no | `hls`, `dash` or both; default: the service's `--format` |
+
+Over MQTT the task is not sent in this form: it is made from the **S3 event** RustFS publishes when
+an upload completes (see [Infrastructure](infrastructure.md#the-event-message)). The id comes from
+the key: `shows/Episode 1.mkv` → `shows_Episode_1`.
 
 A **status message** (one per event):
 
@@ -216,6 +235,7 @@ A **status message** (one per event):
 | `job_done` | a format finished | `format`, `manifest` |
 | `job_failed` | a format failed | `format`, `error` |
 | `completed` | every format of the task succeeded | |
+| `skipped` | the same version of this video was already transcoded (see [Duplicates](#duplicates-and-replacing)) | |
 | `failed` | the task did not complete (unreadable input, failed or cancelled job) | `error`, maybe `format` |
 
 ### Slots and scheduling
@@ -225,10 +245,14 @@ end and runs its formats one after another. The worker only takes a task from th
 is free, so tasks it cannot start yet stay available for other workers. Scaling out means starting
 more workers.
 
+With MQTT the broker *pushes* messages, so "only take a task when a slot is free" has to be told to
+the broker: the worker connects with **Receive Maximum = slots** and acknowledges a message only when
+its task is **finished**. The broker never has more unacknowledged messages out to a worker than it
+has slots; the rest wait in the broker, not in the worker's memory. See [MQTT backend](#the-mqtt-backend).
+
 ### The mock PubSub
 
-Until Valkey is set up, `--pubsub mock` (the default) uses a folder (`--mock-dir`, default
-`mock-pubsub/`):
+`--pubsub mock` (the default) uses a folder (`--mock-dir`, default `mock-pubsub/`):
 
 ```
 mock-pubsub/
@@ -244,8 +268,86 @@ workers poll the same folder only one of them gets each task, the same guarantee
 `scripts/publish_task.py` publishes tasks (writing to a temporary name first so a worker never reads
 a half-written file) and can follow their status.
 
-The service only talks to the `PubSub` and `Publisher` traits. A Valkey backend implements those two
-traits and becomes another `--pubsub` value; `service.rs` does not change.
+The service only talks to the `PubSub` and `Publisher` traits. The MQTT backend implements the same
+two traits; `service.rs` did not change for it.
+
+### The MQTT backend
+
+`--pubsub mqtt` (`pubsub/mqtt.rs`, client library `rumqttc`, MQTT 5):
+
+```mermaid
+flowchart LR
+    Broker{{Mosquitto}} -->|"$share/transcoders/<br/>dodoglass/ingest"| Loop
+    subgraph Worker["MqttPubSub"]
+        Loop["background task:<br/>eventloop.poll() forever"] -->|"S3 event → Task(s)"| Chan[[channel]]
+    end
+    Chan -->|next_task| Service[service.rs]
+    Service -->|"status (try_publish)"| Broker
+    Service -.->|"task dropped → PUBACK"| Broker
+```
+
+- **The event loop runs in its own task.** rumqttc must be polled constantly: it sends the keep-alive
+  pings, receives messages and sends what the client handles queued. If it were only polled in
+  `next_task`, a worker busy for minutes would miss its pings and be disconnected.
+- **Shared subscription** `$share/<group>/<topic>`: the broker gives each event to one worker of the
+  group, so several transcoders split the work instead of all doing the same video.
+- **Acknowledge when done.** `manual_acks`, and every task carries an `Ack` handle; when the last copy
+  of the task is dropped (done, failed, skipped, early return) the message is acknowledged, exactly
+  once. One S3 message can hold several records; it is acknowledged when all of its tasks are done.
+  Messages that are not valid tasks are acknowledged right away (redelivering them would not help).
+- **Reconnects:** on a new connection the worker subscribes again and republishes its registration.
+  Packet ids start over with every connection, so an acknowledgement for a message from an earlier
+  connection is *not* sent: it could hit a different message.
+- **Status never blocks:** status is published with `try_publish`. If the broker is unreachable and
+  rumqttc's queue (64 requests) is full, a status update is dropped and logged, instead of stalling
+  the task that reports it and the ffmpeg process it reads from.
+- **Registration:** retained on `dodoglass/workers/<id>`; cleared on exit, and by the broker's
+  *last will* if the worker dies without exiting cleanly.
+- The first connection is awaited at startup (10 s), so a wrong broker address fails immediately.
+
+### Inputs and outputs in buckets
+
+With `--s3-endpoint` (and keys), inputs can be objects; with `--output-bucket` results are written
+to that bucket instead of `--out`. How this avoids the disk entirely is explained in
+[Efficiency](efficiency.md); in short:
+
+- **Input:** the service creates a **presigned URL** for the object (valid 12 h, because ffmpeg uses
+  it for the whole transcode) and gives that to ffprobe and ffmpeg. They read the video straight from
+  the storage with HTTP range requests, and reconnect and continue where they were if the connection
+  drops (`-reconnect`). With the eTag from the event they send `If-Match`, so a file replaced during
+  the transcode fails with `412` instead of mixing two versions.
+- **Output:** ffmpeg uploads every segment, playlist and manifest with HTTP `PUT` (`-method PUT`) to a
+  small endpoint of the service on `127.0.0.1` (`upload.rs`), which stores each file in the bucket,
+  signed, before answering ffmpeg. A random token in the path keeps other local programs out.
+  Upload errors are counted per job; a job with a failed upload fails, even if ffmpeg did not stop.
+- **Old output** in the bucket (`<id>/hls/`, `<id>/dash/`) is deleted before each format starts, as
+  the runner does for folders on disk.
+- **Signed URLs are secrets** until they expire: the command line and every ffmpeg log line pass
+  through `redact()`, which replaces `?X-Amz-…` with `?<signature redacted>`.
+
+### Duplicates and replacing
+
+The task id comes from the object's name, so the **name is the identity of a video**: uploading
+`sample.mp4` again means "new version of `sample`", and its result in `final/sample/` is replaced.
+
+| Upload | Result |
+|---|---|
+| a name not seen before | transcoded |
+| the same name, **same content** (same eTag) | `skipped`: no work at all |
+| the same name, different content | transcoded, the old result replaced |
+| the same name while it is being transcoded | waits for the running task, then one of the above |
+
+- After a task completed, `final/<id>/source.json` records the input, its **eTag** and the formats.
+  An event with the same eTag and formats is skipped. The marker is deleted before a replacement
+  starts, so a half-replaced output is never taken for complete.
+- **At most one task per id at a time:** a second one waits (keeping its slot) instead of running in
+  parallel and deleting the other's files.
+- **eTag caveat:** for multipart uploads the eTag depends on the part size (`…-2` = two parts). The
+  same file uploaded with a different tool (browser: 2 parts, AWS CLI: 8 MB parts) gets a different
+  eTag and is transcoded again. This errs on the safe side: different content never has the same eTag.
+- Two *different* videos with the same name overwrite each other's result. A production system would
+  give each version its own folder (`final/<id>/<eTag>/…` plus a `latest.json` pointing at the current
+  one), so nothing a player might be reading is ever overwritten. Not needed here.
 
 ### Logging
 
@@ -288,8 +390,18 @@ The service is built to run as a Docker container:
 | Option | Environment variable | Default |
 |---|---|---|
 | `--service` | `TRANSCODER_SERVICE=true` | off |
-| `--pubsub` | `TRANSCODER_PUBSUB` | `mock` |
+| `--pubsub` | `TRANSCODER_PUBSUB` | `mock` (or `mqtt`) |
 | `--mock-dir` | `TRANSCODER_MOCK_DIR` | `mock-pubsub` |
+| `--mqtt-url` | `TRANSCODER_MQTT_URL` | `mqtt://localhost:1883` |
+| `--mqtt-topic` | `TRANSCODER_MQTT_TOPIC` | `dodoglass/ingest` |
+| `--mqtt-group` | `TRANSCODER_MQTT_GROUP` | `transcoders` |
+| `--mqtt-status-topic` | `TRANSCODER_MQTT_STATUS_TOPIC` | `dodoglass/status` |
+| `--mqtt-workers-topic` | `TRANSCODER_MQTT_WORKERS_TOPIC` | `dodoglass/workers` |
+| `--s3-endpoint` | `TRANSCODER_S3_ENDPOINT` | none (no S3) |
+| `--s3-access-key` | `TRANSCODER_S3_ACCESS_KEY` | |
+| `--s3-secret-key` | `TRANSCODER_S3_SECRET_KEY` (prefer this: arguments show in `ps`) | |
+| `--s3-region` | `TRANSCODER_S3_REGION` | `us-east-1` |
+| `--output-bucket` | `TRANSCODER_OUTPUT_BUCKET` | none (write to `--out`) |
 | `--worker-id` | `TRANSCODER_WORKER_ID` | `<hostname>-<pid>` |
 | `--threads` | `TRANSCODER_THREADS` | `4` |
 | `--out` | `TRANSCODER_OUT` | `out` |

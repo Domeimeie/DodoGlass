@@ -12,8 +12,8 @@ sudo dnf install moby-engine docker-compose
 sudo systemctl enable --now docker
 sudo usermod -aG docker $USER        # then log out and in again, so docker works without sudo
 
-# Rust, go-task, MQTT command-line clients
-sudo dnf install rust cargo go-task mosquitto
+# Rust (with formatter and linter for `go-task check`), go-task, MQTT command-line clients
+sudo dnf install rust cargo rustfmt clippy go-task mosquitto
 ```
 
 **ffmpeg with libx264.** Fedora's own `ffmpeg-free` does not include the H.264 encoder the
@@ -76,7 +76,28 @@ go-task sample               # creates sample.mp4
 ```
 
 A JSON message on `dodoglass/ingest` appears in the first terminal. Uploading a `.txt` file produces
-no message.
+no message. Instead of the web console, `go-task infra:upload -- application/transcoder/sample.mp4`
+uploads from the command line (no AWS CLI needed: it uses the `init` container).
+
+## 5. Run the transcoder on it
+
+In a third terminal:
+
+```bash
+go-task transcoder:serve-s3 -- -t 2
+```
+
+It connects to Mosquitto and RustFS (`localhost`, development credentials from `Taskfile.yml`),
+registers and waits. Upload a video to `ingest`: the log shows `task accepted`, progress, `uploaded`,
+`job done` for HLS and DASH and `task completed`; the first terminal shows the status messages on
+`dodoglass/status`. The result:
+
+```bash
+go-task infra:ls -- final        # sample/hls/…, sample/dash/…, sample/source.json
+```
+
+Upload the same file again: `skipped`. Ctrl+C stops the transcoder (running tasks finish first).
+`RUST_LOG=info,transcoder::upload=debug` also logs every uploaded file.
 
 ## Everyday use
 
@@ -88,6 +109,9 @@ All from the repository root:
 | `go-task infra:down` | Stop everything; bucket contents are kept |
 | `go-task infra:reset` | Stop and **delete all bucket contents**, then start fresh (asks first) |
 | `go-task infra:watch` | Print every MQTT message |
+| `go-task infra:upload -- <file>` | Upload a video to `ingest` |
+| `go-task infra:ls [-- <bucket>]` | List the buckets |
+| `go-task transcoder:serve-s3` | Run the transcoder on MQTT + RustFS |
 | `go-task infra:logs` | Follow the logs of RustFS and Mosquitto |
 | `go-task infra:ps` | Show the containers |
 
@@ -101,3 +125,6 @@ All from the repository root:
 | `init` ends with `RustFS did not answer within 60 s` | RustFS failed to start: `go-task infra:logs` and look for errors |
 | Upload works, but no MQTT message | Check the file ends in lowercase `.mp4`, `.mov` or `.mkv` (case-sensitive). Check the RustFS log for `mqtt` errors. Run `go-task infra:up` again to reset the rule |
 | ffmpeg: `Unknown encoder 'libx264'` | `ffmpeg-free` is installed instead of RPM Fusion's ffmpeg, see step 1 |
+| `cargo fmt` / `cargo clippy`: `no such command` | `sudo dnf install rustfmt clippy` |
+| Transcoder: `cannot connect to the MQTT broker` / `cannot access bucket final` | Infrastructure not running: `go-task infra:up` |
+| A task fails with `412 Precondition Failed` | The video was replaced in `ingest` while it was being transcoded; the new upload has its own task |

@@ -8,7 +8,9 @@ mod probe;
 mod pubsub;
 mod runner;
 mod service;
+mod storage;
 mod tui;
+mod upload;
 
 use std::collections::HashSet;
 use std::fs;
@@ -22,7 +24,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 
 use crate::config::{Config, DEFAULT_CONFIG};
-use crate::ffmpeg::{Format, Video};
+use crate::ffmpeg::{Format, OutDir, Video};
+use crate::pubsub::{VIDEO_EXTENSIONS, is_video_name};
 
 /// Transcode videos into HLS and DASH with several quality levels (ffmpeg wrapper).
 ///
@@ -31,7 +34,7 @@ use crate::ffmpeg::{Format, Video};
 #[derive(Parser)]
 #[command(name = "transcoder", version)]
 struct Cli {
-    /// A video file, or a folder: every .mp4 file directly inside it is transcoded
+    /// A video file, or a folder: every .mp4, .mov and .mkv file directly inside it is transcoded
     #[arg(required_unless_present_any = ["print_config", "service"])]
     input: Option<PathBuf>,
 
@@ -75,6 +78,46 @@ struct Cli {
     #[arg(long, env = "TRANSCODER_MOCK_DIR", default_value = "mock-pubsub")]
     mock_dir: PathBuf,
 
+    /// MQTT broker (with --pubsub mqtt)
+    #[arg(long, env = "TRANSCODER_MQTT_URL", default_value = "mqtt://localhost:1883")]
+    mqtt_url: String,
+
+    /// Topic the bucket events arrive on
+    #[arg(long, env = "TRANSCODER_MQTT_TOPIC", default_value = "dodoglass/ingest")]
+    mqtt_topic: String,
+
+    /// Shared-subscription group: workers in one group split the events between them
+    #[arg(long, env = "TRANSCODER_MQTT_GROUP", default_value = "transcoders")]
+    mqtt_group: String,
+
+    /// Topic status messages are published to
+    #[arg(long, env = "TRANSCODER_MQTT_STATUS_TOPIC", default_value = "dodoglass/status")]
+    mqtt_status_topic: String,
+
+    /// Workers register (retained) below this topic
+    #[arg(long, env = "TRANSCODER_MQTT_WORKERS_TOPIC", default_value = "dodoglass/workers")]
+    mqtt_workers_topic: String,
+
+    /// S3 endpoint for inputs in buckets and for --output-bucket, e.g. http://localhost:9000
+    #[arg(long, env = "TRANSCODER_S3_ENDPOINT")]
+    s3_endpoint: Option<String>,
+
+    /// S3 access key
+    #[arg(long, env = "TRANSCODER_S3_ACCESS_KEY", requires = "s3_endpoint")]
+    s3_access_key: Option<String>,
+
+    /// S3 secret key (prefer the environment variable: arguments are visible in `ps`)
+    #[arg(long, env = "TRANSCODER_S3_SECRET_KEY", hide_env_values = true, requires = "s3_endpoint")]
+    s3_secret_key: Option<String>,
+
+    /// S3 region
+    #[arg(long, env = "TRANSCODER_S3_REGION", default_value = "us-east-1")]
+    s3_region: String,
+
+    /// Upload results to this bucket instead of writing them to --out
+    #[arg(long, env = "TRANSCODER_OUTPUT_BUCKET", requires = "s3_endpoint")]
+    output_bucket: Option<String>,
+
     /// Name this worker registers with [default: <hostname>-<pid>]
     #[arg(long, env = "TRANSCODER_WORKER_ID")]
     worker_id: Option<String>,
@@ -88,6 +131,8 @@ struct Cli {
 enum PubSubKind {
     /// Files in --mock-dir (for development)
     Mock,
+    /// An MQTT broker that receives bucket events (--mqtt-*)
+    Mqtt,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -157,8 +202,9 @@ fn run() -> Result<bool> {
         .map(|(path, source)| {
             let name = file_stem(&path);
             Video {
-                out_dir: cli.out.join(&name),
-                path,
+                out_dir: OutDir::Local(cli.out.join(&name)),
+                input: path.display().to_string(),
+                input_etag: None,
                 name,
                 source,
             }
@@ -228,7 +274,7 @@ fn run() -> Result<bool> {
     Ok(ok)
 }
 
-/// The input itself, or every .mp4 file directly inside it if it is a folder.
+/// The input itself, or every video file (.mp4, .mov, .mkv) directly inside it if it is a folder.
 fn discover(input: &Path) -> Result<Vec<PathBuf>> {
     if input.is_file() {
         return Ok(vec![input.to_path_buf()]);
@@ -239,17 +285,17 @@ fn discover(input: &Path) -> Result<Vec<PathBuf>> {
     let mut files: Vec<PathBuf> = fs::read_dir(input)
         .with_context(|| format!("cannot read folder {}", input.display()))?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.is_file()
-                && p.extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
-        })
+        .filter(|p| p.is_file() && is_video_name(&p.to_string_lossy()))
         .collect();
     files.sort();
     if files.is_empty() {
-        bail!("no .mp4 files in {}", input.display());
+        bail!(
+            "no video files (.{}) in {}",
+            VIDEO_EXTENSIONS.join(", ."),
+            input.display()
+        );
     }
-    // Each video writes to <out>/<name>, so names must not repeat (a.mp4 vs a.MP4).
+    // Each video writes to <out>/<name>, so names must not repeat (a.mp4 vs a.MKV).
     let mut names = HashSet::new();
     for f in &files {
         if !names.insert(file_stem(f).to_lowercase()) {
@@ -273,7 +319,9 @@ async fn probe_all(paths: Vec<PathBuf>) -> Vec<Result<probe::SourceInfo, String>
     let handles: Vec<_> = paths
         .into_iter()
         .map(|p| {
-            tokio::task::spawn_blocking(move || probe::probe(&p).map_err(|e| format!("{e:#}")))
+            tokio::task::spawn_blocking(move || {
+                probe::probe(&p.display().to_string(), None).map_err(|e| format!("{e:#}"))
+            })
         })
         .collect();
     let mut results = Vec::with_capacity(handles.len());
@@ -287,22 +335,62 @@ fn run_service(cli: Cli) -> Result<bool> {
     init_logging(cli.log_format);
     let config = Config::load(cli.config.as_deref())?;
     let slots = cli.threads as usize;
-    let settings = service::Settings {
-        worker_id: cli.worker_id.unwrap_or_else(service::default_worker_id),
-        config,
-        out_dir: cli.out,
-        formats: cli.format.formats(),
-        slots,
+    let worker_id = cli.worker_id.clone().unwrap_or_else(service::default_worker_id);
+
+    let storage = match &cli.s3_endpoint {
+        Some(endpoint) => Some(Arc::new(storage::Storage::new(storage::S3Settings {
+            endpoint: endpoint.clone(),
+            access_key: cli
+                .s3_access_key
+                .clone()
+                .context("--s3-access-key (TRANSCODER_S3_ACCESS_KEY) is missing")?,
+            secret_key: cli
+                .s3_secret_key
+                .clone()
+                .context("--s3-secret-key (TRANSCODER_S3_SECRET_KEY) is missing")?,
+            region: cli.s3_region.clone(),
+        }))),
+        None => None,
     };
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(slots)
         .enable_all()
         .build()
         .context("cannot start the tokio runtime")?;
     runtime.block_on(async {
+        let output = match (&cli.output_bucket, &storage) {
+            (Some(bucket), Some(storage)) => {
+                // Fail now rather than after the first transcode.
+                storage.check_bucket(bucket).await?;
+                let uploads = upload::UploadServer::start(storage.clone(), bucket.clone()).await?;
+                tracing::info!(bucket = %bucket, endpoint = storage.endpoint(), "results go to bucket");
+                service::Output::Bucket(uploads)
+            }
+            _ => service::Output::Local(cli.out.clone()),
+        };
+        let settings = service::Settings {
+            worker_id: worker_id.clone(),
+            config,
+            output,
+            storage,
+            formats: cli.format.formats(),
+            slots,
+        };
         match cli.pubsub {
             PubSubKind::Mock => {
-                let pubsub = pubsub::mock::MockPubSub::new(cli.mock_dir, &settings.worker_id);
+                let pubsub = pubsub::mock::MockPubSub::new(cli.mock_dir, &worker_id);
+                service::run(pubsub, settings).await
+            }
+            PubSubKind::Mqtt => {
+                let mqtt = pubsub::mqtt::MqttSettings {
+                    broker: cli.mqtt_url,
+                    topic: cli.mqtt_topic,
+                    group: cli.mqtt_group,
+                    status_topic: cli.mqtt_status_topic,
+                    workers_topic: cli.mqtt_workers_topic,
+                };
+                let pubsub = pubsub::mqtt::MqttPubSub::new(mqtt, &worker_id, slots)?;
                 service::run(pubsub, settings).await
             }
         }

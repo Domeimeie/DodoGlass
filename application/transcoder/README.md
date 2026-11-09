@@ -5,7 +5,9 @@ format in one manifest. Give it one file or a whole folder; several videos are t
 parallel. Progress is shown in a full-screen terminal interface, or as plain text when run headless.
 
 With `--service` it runs unattended instead: it registers on PubSub, waits for tasks, transcodes them
-and publishes status. That is how it runs on the platform, later as a Docker container.
+and publishes status. That is how it runs on the platform, later as a Docker container. On MQTT and
+RustFS it transcodes every video uploaded to the `ingest` bucket into the `final` bucket, streaming
+in and out: the video never lands on the transcoder's disk ([Efficiency](../../docs/architecture/efficiency.md)).
 
 How it works inside: see the [Transcoder architecture page](../../docs/architecture/transcoder.md),
 also served by the docs site (`go-task docs:serve`).
@@ -48,7 +50,7 @@ cargo run -- [OPTIONS] <INPUT>
 
 | Option | Meaning |
 |---|---|
-| `<INPUT>` | A video file, or a folder: every `.mp4` directly inside it is transcoded (subfolders are not searched) |
+| `<INPUT>` | A video file, or a folder: every `.mp4`, `.mov` and `.mkv` directly inside it is transcoded (subfolders are not searched) |
 | `-c, --config <FILE>` | Transcoding config (TOML). Without it, the built-in `ladder.toml` is used |
 | `-o, --out <DIR>` | Output folder. Each video gets its own subfolder `<DIR>/<video name>`. Default: `out` |
 | `-f, --format <hls\|dash\|both>` | Which formats to produce. Default: `both` |
@@ -98,8 +100,24 @@ The service registers as a worker, takes tasks from the `transcode.tasks` channe
 `--threads` of them at once and publishes status to `transcode.status`. There is no TUI; logs go to
 stdout.
 
-For now the PubSub is a **mock** made of files in `mock-pubsub/` (Valkey comes later). Publish tasks
-from a second terminal with the Python script:
+### On MQTT and RustFS
+
+Start the infrastructure (`go-task infra:up` from the repository root, see the
+[setup guide](../../docs/architecture/setup.md)), then:
+
+```bash
+go-task serve-s3 -- -t 2                        # MQTT + RustFS, results to the bucket "final"
+go-task infra:upload -- application/transcoder/sample.mp4   # from the repository root
+```
+
+Each upload of a `.mp4`, `.mov` or `.mkv` to `ingest` becomes a task; the result goes to
+`final/<name>/hls/` and `final/<name>/dash/`. Uploading the same file again is skipped; a different
+file with the same name replaces the result. Details: [architecture page](../../docs/architecture/transcoder.md#the-mqtt-backend).
+
+### On the mock PubSub
+
+Without a broker, the PubSub can be a **mock** made of files in `mock-pubsub/`. Publish tasks from a
+second terminal with the Python script:
 
 ```bash
 go-task publish -- samples/bars_1080p24.mp4     # one video
@@ -121,7 +139,10 @@ Only `input` is required. The output goes to `<out>/<id>/`.
 | Service option | Environment variable | Default |
 |---|---|---|
 | `--service` | `TRANSCODER_SERVICE=true` | off |
-| `--pubsub` | `TRANSCODER_PUBSUB` | `mock` |
+| `--pubsub mock\|mqtt` | `TRANSCODER_PUBSUB` | `mock` |
+| `--mqtt-url`, `--mqtt-topic`, `--mqtt-group` | `TRANSCODER_MQTT_*` | `mqtt://localhost:1883`, `dodoglass/ingest`, `transcoders` |
+| `--s3-endpoint`, `--s3-access-key`, `--s3-secret-key` | `TRANSCODER_S3_*` | none |
+| `--output-bucket` | `TRANSCODER_OUTPUT_BUCKET` | none: write to `--out` |
 | `--mock-dir` | `TRANSCODER_MOCK_DIR` | `mock-pubsub` |
 | `--worker-id` | `TRANSCODER_WORKER_ID` | `<hostname>-<pid>` |
 | `--log-format text\|json` | `TRANSCODER_LOG_FORMAT` | `text` |
@@ -200,6 +221,7 @@ Run from this folder with `go-task <name>`, or from the repository root with
 | `release` | Optimized build in `target/release/transcoder` |
 | `run -- <args>` | Run with arguments, e.g. `go-task run -- samples -t 2` |
 | `serve -- <args>` | Run as a service on the mock PubSub |
+| `serve-s3 -- <args>` | Run as a service on MQTT + RustFS (start `infra:up` first) |
 | `publish -- <args>` | Publish tasks with `scripts/publish_task.py`, e.g. `go-task publish -- samples --follow` |
 | `status` | Follow the mock status channel |
 | `sample` | Create the 30 s test video `sample.mp4` (skipped if it exists) |

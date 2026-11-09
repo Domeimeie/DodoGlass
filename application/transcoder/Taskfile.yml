@@ -22,6 +22,19 @@ tasks:
     cmds:
       - cargo run -- --service {{.CLI_ARGS}}
 
+  serve-s3:
+    desc: 'Run as a service on MQTT + RustFS (first: go-task infra:up), e.g. go-task serve-s3 -- -t 2'
+    env:
+      TRANSCODER_PUBSUB: mqtt
+      TRANSCODER_MQTT_URL: mqtt://localhost:1883
+      TRANSCODER_S3_ENDPOINT: http://localhost:9000
+      # RustFS's default development credentials (see infra/compose.yml)
+      TRANSCODER_S3_ACCESS_KEY: rustfsadmin
+      TRANSCODER_S3_SECRET_KEY: rustfsadmin
+      TRANSCODER_OUTPUT_BUCKET: final
+    cmds:
+      - cargo run -- --service {{.CLI_ARGS}}
+
   publish:
     desc: 'Publish demo tasks to the mock PubSub, e.g. go-task publish -- samples --follow'
     cmds:

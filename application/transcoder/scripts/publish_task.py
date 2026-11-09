@@ -20,7 +20,7 @@ from pathlib import Path
 
 TASK_CHANNEL = "transcode.tasks"
 STATUS_CHANNEL = "transcode.status"
-FINAL_EVENTS = {"completed", "failed", "rejected"}
+FINAL_EVENTS = {"completed", "failed", "rejected", "skipped"}
 
 
 def find_inputs(paths):

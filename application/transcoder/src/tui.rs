@@ -593,7 +593,7 @@ fn quit_or_cancel(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffmpeg::Format;
+    use crate::ffmpeg::{Format, OutDir};
     use crate::probe::SourceInfo;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -610,9 +610,10 @@ mod tests {
             audio_codec: Some("aac".into()),
         };
         let video = |name: &str, source: Result<SourceInfo, String>| Video {
-            path: format!("videos/{name}.mp4").into(),
+            input: format!("videos/{name}.mp4"),
+            input_etag: None,
             name: name.into(),
-            out_dir: format!("out/{name}").into(),
+            out_dir: OutDir::Local(format!("out/{name}").into()),
             source,
         };
         let videos = vec![
@@ -629,6 +630,7 @@ mod tests {
                         video: i,
                         format,
                         args: vec![],
+                        dir: v.out_dir.clone(),
                         manifest: v.out_dir.join("x"),
                     });
                 }

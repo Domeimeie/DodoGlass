@@ -6,6 +6,7 @@ nav:
   - Architecture: architecture.md
   - Transcoder: transcoder.md
   - Infrastructure: infrastructure.md
+  - Efficiency: efficiency.md
   - Setup: setup.md
 
 theme:
