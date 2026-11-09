@@ -1,0 +1,36 @@
+version: '3'
+
+tasks:
+  up:
+    desc: Start RustFS + Mosquitto in the background and set up buckets and the event rule
+    cmds:
+      - docker compose up -d
+      - docker compose logs init --follow --no-log-prefix
+
+  down:
+    desc: Stop the infrastructure (bucket contents are kept)
+    cmds:
+      - docker compose down
+
+  reset:
+    desc: Stop the infrastructure and DELETE all bucket contents, then start fresh
+    prompt: This deletes everything stored in RustFS. Continue?
+    cmds:
+      - docker compose down --volumes
+      - task: up
+
+  logs:
+    desc: Follow the logs of RustFS and Mosquitto
+    cmds:
+      - docker compose logs --follow rustfs mosquitto
+
+  ps:
+    desc: Show which containers are running
+    cmds:
+      - docker compose ps --all
+
+  watch:
+    desc: Print every MQTT message on the dodoglass/ topics (needs mosquitto_sub, or uses the container's)
+    interactive: true
+    cmds:
+      - docker compose exec mosquitto mosquitto_sub -t 'dodoglass/#' -v

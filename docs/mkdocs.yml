@@ -5,6 +5,8 @@ site_dir: site
 nav:
   - Architecture: architecture.md
   - Transcoder: transcoder.md
+  - Infrastructure: infrastructure.md
+  - Setup: setup.md
 
 theme:
   name: readthedocs

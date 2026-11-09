@@ -1,0 +1,22 @@
+{
+  "QueueConfigurations": [
+    {
+      "Id": "ingest-mp4",
+      "QueueArn": "arn:rustfs:sqs:us-east-1:primary:mqtt",
+      "Events": ["s3:ObjectCreated:*"],
+      "Filter": { "Key": { "FilterRules": [{ "Name": "suffix", "Value": ".mp4" }] } }
+    },
+    {
+      "Id": "ingest-mov",
+      "QueueArn": "arn:rustfs:sqs:us-east-1:primary:mqtt",
+      "Events": ["s3:ObjectCreated:*"],
+      "Filter": { "Key": { "FilterRules": [{ "Name": "suffix", "Value": ".mov" }] } }
+    },
+    {
+      "Id": "ingest-mkv",
+      "QueueArn": "arn:rustfs:sqs:us-east-1:primary:mqtt",
+      "Events": ["s3:ObjectCreated:*"],
+      "Filter": { "Key": { "FilterRules": [{ "Name": "suffix", "Value": ".mkv" }] } }
+    }
+  ]
+}

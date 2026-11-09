@@ -4,6 +4,9 @@ includes:
   docs:
     taskfile: ./docs
     dir: ./docs
+  infra:
+    taskfile: ./infra
+    dir: ./infra
   transcoder:
     taskfile: ./application/transcoder
     dir: ./application/transcoder

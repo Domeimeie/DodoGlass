@@ -26,5 +26,21 @@ services:
       - rustfs-data:/data
     depends_on: [mosquitto]
 
+  # Runs once and exits: creates the buckets and the event rule (infra/init.sh).
+  # Uses the AWS CLI image, so the host needs no S3 client installed.
+  init:
+    image: amazon/aws-cli:2.39.5
+    entrypoint: ["sh", "/init/init.sh"]
+    environment:
+      AWS_ACCESS_KEY_ID: rustfsadmin
+      AWS_SECRET_ACCESS_KEY: rustfsadmin
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://rustfs:9000
+    volumes:
+      - ./init.sh:/init/init.sh:ro,Z
+      - ./ingest-notification.json:/init/ingest-notification.json:ro,Z
+    depends_on: [rustfs]
+    restart: "no"
+
 volumes:
   rustfs-data:
