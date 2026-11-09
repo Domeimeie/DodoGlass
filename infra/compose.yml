@@ -1,0 +1,30 @@
+# Local infrastructure for the transcoder: object storage (RustFS) and an MQTT broker (Mosquitto).
+# Start with: docker compose up   (from this folder)
+# The transcoder itself runs natively and reaches both through localhost.
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.1.2-alpine
+    ports: ["1883:1883"]
+    volumes:
+      # :Z lets the container read the file under SELinux (Fedora)
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro,Z
+
+  rustfs:
+    image: rustfs/rustfs:1.0.4
+    ports:
+      - "9000:9000" # S3 API (the transcoder talks to this)
+      - "9001:9001" # web console
+    environment:
+      RUSTFS_VOLUMES: /data
+      # Bucket events -> MQTT target named "primary" (the _PRIMARY suffix sets the name)
+      RUSTFS_NOTIFY_ENABLE: "true"
+      RUSTFS_NOTIFY_MQTT_ENABLE_PRIMARY: "on"
+      RUSTFS_NOTIFY_MQTT_BROKER_PRIMARY: mqtt://mosquitto:1883
+      RUSTFS_NOTIFY_MQTT_TOPIC_PRIMARY: dodoglass/ingest
+      RUSTFS_NOTIFY_MQTT_QOS_PRIMARY: "1"
+    volumes:
+      - rustfs-data:/data
+    depends_on: [mosquitto]
+
+volumes:
+  rustfs-data:
