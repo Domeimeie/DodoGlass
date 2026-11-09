@@ -96,7 +96,9 @@ registers and waits. Upload a video to `ingest`: the log shows `task accepted`, 
 go-task infra:ls -- final        # sample/hls/…, sample/dash/…, sample/source.json
 ```
 
-Upload the same file again: `skipped`. Ctrl+C stops the transcoder (running tasks finish first).
+After the task, `sample.mp4` is gone from `ingest`: a transcoded input is consumed (`--keep-input`
+keeps it). Upload the same file again: `skipped`, and it is removed as well. Ctrl+C stops the
+transcoder (running tasks finish first).
 `RUST_LOG=info,transcoder::upload=debug` also logs every uploaded file.
 
 ## Everyday use

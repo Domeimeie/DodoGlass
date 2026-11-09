@@ -21,7 +21,7 @@ use crate::pubsub::{
     Input, PubSub, Publisher, StatusEvent, StatusMessage, Task, WorkerInfo, now_ms,
 };
 use crate::runner::{self, Event, Outcome};
-use crate::storage::Storage;
+use crate::storage::{Removal, Storage};
 use crate::upload::UploadServer;
 
 /// How many of ffmpeg's last log lines to keep for the error message of a failed job.
@@ -36,6 +36,9 @@ pub struct Settings {
     pub formats: Vec<Format>,
     /// How many tasks run at the same time.
     pub slots: usize,
+    /// Keep inputs in their bucket after a completed or skipped task
+    /// (default: delete them, so the input bucket only holds what is waiting).
+    pub keep_input: bool,
 }
 
 /// Where results go.
@@ -227,6 +230,7 @@ async fn handle_task<P: Publisher + Clone>(
             Ok(Some(json)) => match serde_json::from_slice::<SourceMarker>(&json) {
                 Ok(m) if m.etag == *etag && m.formats == formats => {
                     info!(%etag, "unchanged since the last transcode, skipped");
+                    consume_input(&task, s).await;
                     return publish(status(StatusEvent::Skipped)).await;
                 }
                 Ok(_) => info!("new version of this video: replacing the earlier output"),
@@ -427,12 +431,38 @@ async fn handle_task<P: Publisher + Clone>(
             warn!(error = format!("{e:#}"), "cannot write {SOURCE_MARKER}");
         }
     }
+    consume_input(&task, s).await;
     info!(
         took_s = format!("{:.1}", started.elapsed().as_secs_f64()),
         output = %video.out_dir.display(),
         "task completed"
     );
     publish(status(StatusEvent::Completed)).await;
+}
+
+/// After a completed or skipped task: delete the input object, but only the
+/// version that was transcoded. A failed task keeps its input for a retry;
+/// files on disk are never deleted.
+async fn consume_input(task: &Task, s: &Settings) {
+    if s.keep_input {
+        return;
+    }
+    let (Input::Object { bucket, key, etag }, Some(storage)) = (&task.input, &s.storage) else {
+        return;
+    };
+    let Some(etag) = etag else {
+        warn!("input kept: the event had no eTag, so its version cannot be checked");
+        return;
+    };
+    match storage.delete_if_unchanged(bucket, key, etag).await {
+        Ok(Removal::Deleted) => info!(input = %task.input, "input removed"),
+        Ok(Removal::Changed) => info!(
+            input = %task.input,
+            "input kept: a newer upload with the same name arrived meanwhile"
+        ),
+        Ok(Removal::Gone) => debug!(input = %task.input, "input was already removed"),
+        Err(e) => warn!(error = format!("{e:#}"), "could not remove the input"),
+    }
 }
 
 async fn fail<F, Fut>(publish: &F, mut message: StatusMessage, reason: String)

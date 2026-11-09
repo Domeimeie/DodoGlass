@@ -139,6 +139,11 @@ struct Cli {
     #[arg(long, env = "TRANSCODER_OUTPUT_BUCKET", requires = "s3_endpoint")]
     output_bucket: Option<String>,
 
+    /// Keep input videos in their bucket after they were transcoded (or skipped as unchanged).
+    /// Default: delete them, only the version that was transcoded
+    #[arg(long, env = "TRANSCODER_KEEP_INPUT")]
+    keep_input: bool,
+
     /// Name this worker registers with [default: <hostname>-<pid>]
     #[arg(long, env = "TRANSCODER_WORKER_ID")]
     worker_id: Option<String>,
@@ -400,6 +405,7 @@ fn run_service(cli: Cli) -> Result<bool> {
             storage,
             formats: cli.format.formats(),
             slots,
+            keep_input: cli.keep_input,
         };
         match cli.pubsub {
             PubSubKind::Mock => {

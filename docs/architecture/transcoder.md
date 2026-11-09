@@ -345,6 +345,13 @@ The task id comes from the object's name, so the **name is the identity of a vid
 - **eTag caveat:** for multipart uploads the eTag depends on the part size (`…-2` = two parts). The
   same file uploaded with a different tool (browser: 2 parts, AWS CLI: 8 MB parts) gets a different
   eTag and is transcoded again. This errs on the safe side: different content never has the same eTag.
+- **The input is consumed.** After a task completed *or* was skipped, the original is deleted from
+  `ingest`, so the bucket only holds videos that are still waiting (or failed: a failed task keeps
+  its input for a retry). The delete is conditional, `DELETE` with `If-Match: "<eTag>"`: if a newer
+  upload with the same name arrived during the transcode, *that* file is kept for its own task
+  instead of being deleted unseen. `object_store` has no conditional delete, so `storage.rs` signs a
+  DELETE URL with it and sends the request with the header itself. `--keep-input` turns the deleting
+  off. Files on disk (mock tasks) are never deleted.
 - Two *different* videos with the same name overwrite each other's result. A production system would
   give each version its own folder (`final/<id>/<eTag>/…` plus a `latest.json` pointing at the current
   one), so nothing a player might be reading is ever overwritten. Not needed here.
@@ -402,6 +409,7 @@ The service is built to run as a Docker container:
 | `--s3-secret-key` | `TRANSCODER_S3_SECRET_KEY` (prefer this: arguments show in `ps`) | |
 | `--s3-region` | `TRANSCODER_S3_REGION` | `us-east-1` |
 | `--output-bucket` | `TRANSCODER_OUTPUT_BUCKET` | none (write to `--out`) |
+| `--keep-input` | `TRANSCODER_KEEP_INPUT=true` | off: inputs in a bucket are deleted after a completed or skipped task |
 | `--worker-id` | `TRANSCODER_WORKER_ID` | `<hostname>-<pid>` |
 | `--threads` | `TRANSCODER_THREADS` | `4` |
 | `--out` | `TRANSCODER_OUT` | `out` |

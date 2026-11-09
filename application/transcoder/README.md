@@ -111,8 +111,9 @@ go-task infra:upload -- application/transcoder/sample.mp4   # from the repositor
 ```
 
 Each upload of a `.mp4`, `.mov` or `.mkv` to `ingest` becomes a task; the result goes to
-`final/<name>/hls/` and `final/<name>/dash/`. Uploading the same file again is skipped; a different
-file with the same name replaces the result. Details: [architecture page](../../docs/architecture/transcoder.md#the-mqtt-backend).
+`final/<name>/hls/` and `final/<name>/dash/`, and the original is removed from `ingest` (unless
+`--keep-input`). Uploading the same file again is skipped; a different file with the same name
+replaces the result. Details: [architecture page](../../docs/architecture/transcoder.md#the-mqtt-backend).
 
 ### On the mock PubSub
 
@@ -143,6 +144,7 @@ Only `input` is required. The output goes to `<out>/<id>/`.
 | `--mqtt-url`, `--mqtt-topic`, `--mqtt-group` | `TRANSCODER_MQTT_*` | `mqtt://localhost:1883`, `dodoglass/ingest`, `transcoders` |
 | `--s3-endpoint`, `--s3-access-key`, `--s3-secret-key` | `TRANSCODER_S3_*` | none |
 | `--output-bucket` | `TRANSCODER_OUTPUT_BUCKET` | none: write to `--out` |
+| `--keep-input` | `TRANSCODER_KEEP_INPUT` | off: delete inputs after a completed or skipped task |
 | `--mock-dir` | `TRANSCODER_MOCK_DIR` | `mock-pubsub` |
 | `--worker-id` | `TRANSCODER_WORKER_ID` | `<hostname>-<pid>` |
 | `--log-format text\|json` | `TRANSCODER_LOG_FORMAT` | `text` |

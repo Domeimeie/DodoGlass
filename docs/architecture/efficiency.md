@@ -110,6 +110,9 @@ request to be signed, which ffmpeg cannot do, so the transcoder runs a small HTT
   eTag. Uploading the same file again costs reading that one small file instead of a full transcode:
   for the 3 GB video, a fraction of a second instead of 176 s on 16 CPU cores. Different content with the same name is transcoded
   and replaces the old result ([details](transcoder.md#duplicates-and-replacing)).
+- **The input bucket does not grow.** A transcoded (or skipped) original is deleted from `ingest`,
+  conditionally on its eTag, so a newer upload with the same name is never lost
+  ([details](transcoder.md#duplicates-and-replacing)). `ingest` only holds what is still waiting.
 - **One task per video at a time.** Two quick uploads of the same name don't transcode in parallel
   and overwrite each other; the second waits, then usually finds the first's result and skips.
 - **Filtering at the source.** The bucket's event rule only fires for `.mp4`, `.mov` and `.mkv`.

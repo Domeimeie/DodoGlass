@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use object_store::aws::{AmazonS3, AmazonS3Builder};
@@ -32,6 +32,18 @@ pub struct S3Settings {
 pub struct Storage {
     settings: S3Settings,
     buckets: Mutex<HashMap<String, Arc<AmazonS3>>>,
+    /// For the one request object_store cannot make: a conditional DELETE.
+    http: reqwest::Client,
+}
+
+/// What [`Storage::delete_if_unchanged`] did.
+#[derive(Debug, PartialEq)]
+pub enum Removal {
+    Deleted,
+    /// The object is a different version now (a newer upload): it was kept.
+    Changed,
+    /// There was nothing to delete.
+    Gone,
 }
 
 impl Storage {
@@ -39,6 +51,7 @@ impl Storage {
         Storage {
             settings,
             buckets: Mutex::new(HashMap::new()),
+            http: reqwest::Client::new(),
         }
     }
 
@@ -123,6 +136,43 @@ impl Storage {
         match self.bucket(bucket)?.delete(&object_path(key)).await {
             Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
             Err(e) => Err(e).with_context(|| format!("cannot delete s3://{bucket}/{key}")),
+        }
+    }
+
+    /// Deletes the object only if it is still the version `etag`
+    /// (`DELETE` with `If-Match`). Deleting by name alone could remove a newer
+    /// upload with the same name that arrived in the meantime, before its
+    /// own task ran. object_store has no conditional delete, so this signs a
+    /// DELETE URL with it and sends the request with the header added.
+    pub async fn delete_if_unchanged(
+        &self,
+        bucket: &str,
+        key: &str,
+        etag: &str,
+    ) -> Result<Removal> {
+        let url = self
+            .bucket(bucket)?
+            .signed_url(Method::DELETE, &object_path(key), Duration::from_secs(60))
+            .await
+            .with_context(|| format!("cannot sign a delete for s3://{bucket}/{key}"))?;
+        let response = self
+            .http
+            .delete(url.as_str())
+            .header("If-Match", format!("\"{}\"", etag.trim_matches('"')))
+            .send()
+            .await
+            .with_context(|| format!("cannot delete s3://{bucket}/{key}"))?;
+        match response.status().as_u16() {
+            200..=299 => Ok(Removal::Deleted),
+            // A condition on an object that no longer exists fails too (412),
+            // so look whether it is a newer version or nothing at all.
+            412 => match self.bucket(bucket)?.head(&object_path(key)).await {
+                Ok(_) => Ok(Removal::Changed),
+                Err(object_store::Error::NotFound { .. }) => Ok(Removal::Gone),
+                Err(e) => Err(e).with_context(|| format!("cannot check s3://{bucket}/{key}")),
+            },
+            404 => Ok(Removal::Gone),
+            status => bail!("cannot delete s3://{bucket}/{key}: HTTP {status}"),
         }
     }
 
@@ -229,6 +279,59 @@ mod tests {
             keys("ingest").await,
             ["sample.mp4"],
             "the input was deleted too"
+        );
+    }
+
+    /// Same setup as above: TRANSCODER_TEST_S3=http://localhost:19000 cargo test -- --ignored
+    #[tokio::test]
+    #[ignore = "needs a running RustFS in TRANSCODER_TEST_S3"]
+    async fn conditional_delete_keeps_a_newer_version() {
+        let endpoint = std::env::var("TRANSCODER_TEST_S3").expect("TRANSCODER_TEST_S3 not set");
+        let storage = Storage::new(S3Settings {
+            endpoint,
+            access_key: "rustfsadmin".into(),
+            secret_key: "rustfsadmin".into(),
+            region: "us-east-1".into(),
+        });
+        let store = storage.bucket("ingest").unwrap();
+        let etag_of = |key: &'static str| {
+            let store = store.clone();
+            async move { store.head(&object_path(key)).await.unwrap().e_tag.unwrap() }
+        };
+
+        storage
+            .put("ingest", "v.mp4", Bytes::from_static(b"version 1"))
+            .await
+            .unwrap();
+        let v1 = etag_of("v.mp4").await;
+        storage
+            .put("ingest", "v.mp4", Bytes::from_static(b"version 2"))
+            .await
+            .unwrap();
+        let v2 = etag_of("v.mp4").await;
+        assert_ne!(v1, v2);
+
+        // Task for version 1 finishes after version 2 arrived: must keep version 2.
+        let removal = storage
+            .delete_if_unchanged("ingest", "v.mp4", &v1)
+            .await
+            .unwrap();
+        assert_eq!(removal, Removal::Changed);
+        assert_eq!(etag_of("v.mp4").await, v2);
+
+        assert_eq!(
+            storage
+                .delete_if_unchanged("ingest", "v.mp4", &v2)
+                .await
+                .unwrap(),
+            Removal::Deleted
+        );
+        assert_eq!(
+            storage
+                .delete_if_unchanged("ingest", "v.mp4", &v2)
+                .await
+                .unwrap(),
+            Removal::Gone
         );
     }
 

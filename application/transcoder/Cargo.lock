@@ -2991,6 +2991,7 @@ dependencies = [
  "object_store",
  "percent-encoding",
  "ratatui",
+ "reqwest",
  "rumqttc",
  "serde",
  "serde_json",
