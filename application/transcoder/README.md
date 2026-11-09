@@ -122,7 +122,7 @@ second terminal with the Python script:
 
 ```bash
 go-task publish -- samples/bars_1080p24.mp4     # one video
-go-task publish -- samples --follow             # every .mp4 in samples/, then follow their status
+go-task publish -- samples --follow             # every video in samples/, then follow their status
 scripts/publish_task.py movie.mp4 --id movie-1 --formats hls
 ```
 

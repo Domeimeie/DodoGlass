@@ -82,8 +82,10 @@ flowchart TB
 
 | Type | What it is |
 |---|---|
-| `Video` | One input file: path, name, output folder, and the ffprobe result (or why probing failed) |
+| `Video` | One input: what ffmpeg opens (a path, or a presigned URL plus the eTag to pin), name, output (`OutDir`), and the ffprobe result (or why probing failed) |
+| `OutDir` | Where a job writes: a folder on disk, or an HTTP upload target (`url` for ffmpeg, `shown` = `s3://…` for logs) |
 | `Job` | One ffmpeg run: **one video in one format**. A folder of 6 videos in HLS + DASH is 12 jobs |
+| `Task` / `Input` | Service mode: one unit of work from PubSub; its input is a file or a bucket object (bucket, key, eTag). Carries the `Ack` that confirms the message when the task is dropped |
 | `Event` | A message from the runner to the UI (see below) |
 | `Outcome` | How a job ended: done, failed (with the reason) or cancelled |
 
@@ -107,7 +109,7 @@ sequenceDiagram
     participant Task as Job task × N<br/>(tokio)
     participant FF as ffmpeg process × N
 
-    Main->>Main: parse CLI, load config, find .mp4 files
+    Main->>Main: parse CLI, load config, find .mp4 / .mov / .mkv files
     Main->>Main: probe all files in parallel (ffprobe, on tokio)
     Main->>Main: build jobs: one per video × format
     Main->>Sched: spawn run_all(jobs, N)
@@ -248,7 +250,8 @@ more workers.
 With MQTT the broker *pushes* messages, so "only take a task when a slot is free" has to be told to
 the broker: the worker connects with **Receive Maximum = slots** and acknowledges a message only when
 its task is **finished**. The broker never has more unacknowledged messages out to a worker than it
-has slots; the rest wait in the broker, not in the worker's memory. See [MQTT backend](#the-mqtt-backend).
+has slots; the rest wait in the broker, not in the worker's memory. See [MQTT backend](#the-mqtt-backend)
+(including what has not been tested with several workers).
 
 ### The mock PubSub
 
@@ -305,6 +308,29 @@ flowchart LR
   *last will* if the worker dies without exiting cleanly.
 - The first connection is awaited at startup (10 s), so a wrong broker address fails immediately.
 
+**Tested** with one worker: events in, tasks run, status and registration out, acknowledgement after
+the task, reconnect handling compiled but not provoked. **Not tested yet:**
+
+- **Two or more workers.** By the MQTT 5 spec, the shared subscription gives each event to one
+  member, and Receive Maximum stops the broker from sending a worker more unfinished messages than it
+  has slots. *Which* member gets an event is the broker's choice: Mosquitto picks members in turn, so
+  an event may wait for a busy worker while another one is idle. Start two `serve-s3` in two
+  terminals and upload several videos to see it.
+- **A worker that crashes mid-task.** Its message was never acknowledged. Whether the broker hands
+  it to another member, or keeps it for a client with that id that never comes back (the id contains
+  the process id), depends on the broker and the session settings; with `clean_start` the session
+  ends with the connection.
+
+### Known issue
+
+Once, during development, the input `ingest/sample.mp4` disappeared while a second upload of the
+same file was being transcoded: the DASH job got `404 Not Found` and the bucket was empty afterwards.
+It could not be reproduced: uploading twice, deleting old output, and the whole pipeline twice in a
+row on a fresh RustFS all left the input in place, and ffmpeg sent no DELETE. Since then, inputs are
+read with `If-Match`, so a vanished or replaced input fails cleanly (`404` / `412`) rather than
+silently. If it happens again, `RUST_LOG=info,transcoder::upload=debug` logs every upload and delete
+of the service.
+
 ### Inputs and outputs in buckets
 
 With `--s3-endpoint` (and keys), inputs can be objects; with `--output-bucket` results are written
@@ -322,6 +348,11 @@ to that bucket instead of `--out`. How this avoids the disk entirely is explaine
   Upload errors are counted per job; a job with a failed upload fails, even if ffmpeg did not stop.
 - **Old output** in the bucket (`<id>/hls/`, `<id>/dash/`) is deleted before each format starts, as
   the runner does for folders on disk.
+- **Object keys are used unchanged**, including spaces, brackets and other special characters
+  (`[Judas] Kusuriya - S03E06.mkv`). `object_store`'s usual `Path::from` would percent-encode
+  `[ ] { } # ~ …` into the path, and the request URL encodes it again: `[` became `%255B` and RustFS
+  answered 404. `storage.rs` uses `Path::parse`, which keeps the key; tested against RustFS with
+  such keys (upload, presigned read, conditional delete).
 - **Signed URLs are secrets** until they expire: the command line and every ffmpeg log line pass
   through `redact()`, which replaces `?X-Amz-…` with `?<signature redacted>`.
 
@@ -393,6 +424,10 @@ The service is built to run as a Docker container:
 - **Worker id** defaults to `<hostname>-<pid>`; in a container the hostname is the container ID.
 - **Paths** in tasks are paths inside the container: mount the input and output folders
   (e.g. `/data/in`, `/data/out`) and point `TRANSCODER_OUT` at the output mount.
+- **With buckets no mount is needed at all**: inputs are read from S3 and outputs uploaded to it.
+  `TRANSCODER_S3_ENDPOINT` must be an address the *container* can reach (in Compose:
+  `http://rustfs:9000`, not `localhost`), because the presigned URLs ffmpeg uses point at it. The
+  upload endpoint on `127.0.0.1` is inside the container, next to ffmpeg, and needs no port.
 
 | Option | Environment variable | Default |
 |---|---|---|
@@ -483,6 +518,16 @@ out/
         └── chunk-stream0-00001.m4s …
 ```
 
-Every job deletes and recreates its own `hls/` or `dash/` folder, so segments from an earlier run with
-a different ladder never mix in. Two input files whose names differ only in case (`a.mp4`, `a.MP4`)
+With `--output-bucket` the same layout is in the bucket, plus the marker of the version it was made
+from:
+
+```
+s3://final/<task id>/
+├── hls/ …                   ← as above
+├── dash/ …
+└── source.json              ← {"input", "etag", "formats", "completed_ms", "worker"}
+```
+
+Every job deletes and recreates its own `hls/` or `dash/` folder (in a bucket: the objects below
+that prefix), so segments from an earlier run with a different ladder never mix in. Two input files whose names differ only in case (`a.mp4`, `a.MP4`)
 would share an output folder and are rejected.

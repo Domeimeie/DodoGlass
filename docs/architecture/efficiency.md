@@ -128,10 +128,13 @@ request to be signed, which ffmpeg cannot do, so the transcoder runs a small HTT
   ticks in 10 s.
 - **The broker holds the queue, not the worker.** The worker connects with **Receive Maximum =
   slots** and acknowledges a message only when its task is finished. The broker never sends more
-  unfinished work than the worker has slots. Waiting events stay in the broker, where any free worker
-  can get them, instead of in one busy worker's memory.
+  unfinished work than the worker has slots, so waiting events stay in the broker instead of piling
+  up in a busy worker's memory.
 - **Scaling out** is starting another transcoder: all of them subscribe to the shared subscription
-  `$share/transcoders/dodoglass/ingest`, and the broker gives each event to one of them.
+  `$share/transcoders/dodoglass/ingest`, and the broker gives each event to one of them. (By the MQTT
+  5 spec; measured here with one worker only. Mosquitto assigns members in turn, so an event can wait
+  for a busy worker while another is idle. See
+  [what has not been tested](transcoder.md#the-mqtt-backend).)
 - **Parse only what is needed.** An S3 event is ~2 KB of JSON, mostly request headers. serde reads
   the four fields used (bucket, key, size, eTag) and skips the rest without building it in memory.
 - **Status in steps, never blocking.** Progress is published at 25 / 50 / 75 %, not on every frame.

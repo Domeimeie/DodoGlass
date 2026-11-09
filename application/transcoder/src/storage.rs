@@ -97,7 +97,7 @@ impl Storage {
     pub async fn read_url(&self, bucket: &str, key: &str) -> Result<String> {
         let url = self
             .bucket(bucket)?
-            .signed_url(Method::GET, &object_path(key), READ_URL_VALIDITY)
+            .signed_url(Method::GET, &object_path(key)?, READ_URL_VALIDITY)
             .await
             .with_context(|| format!("cannot sign a read URL for s3://{bucket}/{key}"))?;
         Ok(url.to_string())
@@ -112,7 +112,7 @@ impl Storage {
             ..Default::default()
         };
         self.bucket(bucket)?
-            .put_opts(&object_path(key), PutPayload::from(data), options)
+            .put_opts(&object_path(key)?, PutPayload::from(data), options)
             .await
             .with_context(|| format!("upload of s3://{bucket}/{key} failed"))?;
         Ok(())
@@ -120,7 +120,7 @@ impl Storage {
 
     /// Reads a small object completely; `None` if it does not exist.
     pub async fn get_small(&self, bucket: &str, key: &str) -> Result<Option<Bytes>> {
-        match self.bucket(bucket)?.get(&object_path(key)).await {
+        match self.bucket(bucket)?.get(&object_path(key)?).await {
             Ok(result) => {
                 Ok(Some(result.bytes().await.with_context(|| {
                     format!("cannot read s3://{bucket}/{key}")
@@ -133,7 +133,7 @@ impl Storage {
 
     /// Deleting something that does not exist counts as success.
     pub async fn delete(&self, bucket: &str, key: &str) -> Result<()> {
-        match self.bucket(bucket)?.delete(&object_path(key)).await {
+        match self.bucket(bucket)?.delete(&object_path(key)?).await {
             Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
             Err(e) => Err(e).with_context(|| format!("cannot delete s3://{bucket}/{key}")),
         }
@@ -152,7 +152,7 @@ impl Storage {
     ) -> Result<Removal> {
         let url = self
             .bucket(bucket)?
-            .signed_url(Method::DELETE, &object_path(key), Duration::from_secs(60))
+            .signed_url(Method::DELETE, &object_path(key)?, Duration::from_secs(60))
             .await
             .with_context(|| format!("cannot sign a delete for s3://{bucket}/{key}"))?;
         let response = self
@@ -166,7 +166,7 @@ impl Storage {
             200..=299 => Ok(Removal::Deleted),
             // A condition on an object that no longer exists fails too (412),
             // so look whether it is a newer version or nothing at all.
-            412 => match self.bucket(bucket)?.head(&object_path(key)).await {
+            412 => match self.bucket(bucket)?.head(&object_path(key)?).await {
                 Ok(_) => Ok(Removal::Changed),
                 Err(object_store::Error::NotFound { .. }) => Ok(Removal::Gone),
                 Err(e) => Err(e).with_context(|| format!("cannot check s3://{bucket}/{key}")),
@@ -180,7 +180,7 @@ impl Storage {
     /// don't mix with the new ones. Returns how many were deleted.
     pub async fn delete_prefix(&self, bucket: &str, prefix: &str) -> Result<usize> {
         let store = self.bucket(bucket)?;
-        let prefix = object_path(prefix);
+        let prefix = object_path(prefix)?;
         let locations = store
             .list(Some(&prefix))
             .map(|meta| meta.map(|m| m.location))
@@ -195,9 +195,13 @@ impl Storage {
     }
 }
 
-fn object_path(key: &str) -> Path {
-    // Path::from splits on '/' and escapes what S3 needs escaped.
-    Path::from(key)
+/// The key as object_store's `Path`, unchanged. Not `Path::from`: that
+/// percent-encodes characters object_store considers unsafe (`[`, `]`, `{`,
+/// `#`, `~`, …) *into the path*, and the request URL is then encoded again, so
+/// `[a].mkv` would be asked for as `%5Ba%5D.mkv` and not be found.
+/// `Path::parse` keeps the key as it is; the URL is encoded exactly once.
+fn object_path(key: &str) -> Result<Path> {
+    Path::parse(key).with_context(|| format!("unsupported object key {key:?}"))
 }
 
 /// So that players and browsers get the right type when they fetch the files.
@@ -275,9 +279,10 @@ mod tests {
             }
         };
         assert_eq!(keys("final").await, ["sample/hls/master.m3u8"]);
-        assert_eq!(
-            keys("ingest").await,
-            ["sample.mp4"],
+        // Other tests run in parallel on the same buckets, so only check that
+        // the input survived (not that it is alone).
+        assert!(
+            keys("ingest").await.contains(&"sample.mp4".to_string()),
             "the input was deleted too"
         );
     }
@@ -296,7 +301,14 @@ mod tests {
         let store = storage.bucket("ingest").unwrap();
         let etag_of = |key: &'static str| {
             let store = store.clone();
-            async move { store.head(&object_path(key)).await.unwrap().e_tag.unwrap() }
+            async move {
+                store
+                    .head(&object_path(key).unwrap())
+                    .await
+                    .unwrap()
+                    .e_tag
+                    .unwrap()
+            }
         };
 
         storage
@@ -350,5 +362,72 @@ mod tests {
         );
         assert!(url.contains("X-Amz-Signature="));
         assert!(!url.contains("very-secret"));
+    }
+
+    /// Against a real RustFS: a key with brackets, spaces and other special
+    /// characters can be uploaded, read through its presigned URL (the
+    /// signature must match what RustFS computes) and deleted conditionally.
+    /// TRANSCODER_TEST_S3=http://localhost:19000 cargo test -- --ignored
+    #[tokio::test]
+    #[ignore = "needs a running RustFS in TRANSCODER_TEST_S3"]
+    async fn special_keys_work_against_rustfs() {
+        let endpoint = std::env::var("TRANSCODER_TEST_S3").expect("TRANSCODER_TEST_S3 not set");
+        let storage = Storage::new(S3Settings {
+            endpoint,
+            access_key: "rustfsadmin".into(),
+            secret_key: "rustfsadmin".into(),
+            region: "us-east-1".into(),
+        });
+        for key in [
+            "[Judas] Kusuriya - S03E06.mkv",
+            "a{b}#c~d.mp4",
+            "caf\u{e9} (1).mov",
+        ] {
+            let data = Bytes::from(format!("content of {key}"));
+            storage.put("ingest", key, data.clone()).await.unwrap();
+            let url = storage.read_url("ingest", key).await.unwrap();
+            let response = reqwest::get(&url).await.unwrap();
+            assert_eq!(response.status(), 200, "{key}: {url}");
+            assert_eq!(response.bytes().await.unwrap(), data, "{key}");
+            let etag = storage
+                .bucket("ingest")
+                .unwrap()
+                .head(&object_path(key).unwrap())
+                .await
+                .unwrap()
+                .e_tag
+                .unwrap();
+            let removal = storage
+                .delete_if_unchanged("ingest", key, &etag)
+                .await
+                .unwrap();
+            assert_eq!(removal, Removal::Deleted, "{key}");
+        }
+    }
+
+    /// The bug: "[Judas] Kusuriya - S03E06.mkv" was requested as %255BJudas%255D… (404).
+    #[tokio::test]
+    async fn special_characters_in_keys_are_encoded_once() {
+        let storage = Storage::new(S3Settings {
+            endpoint: "http://localhost:9000".into(),
+            access_key: "AKID".into(),
+            secret_key: "secret".into(),
+            region: "us-east-1".into(),
+        });
+        let url = storage
+            .read_url("ingest", "[Judas] Kusuriya - S03E06.mkv")
+            .await
+            .unwrap();
+        assert!(
+            url.starts_with(
+                "http://localhost:9000/ingest/%5BJudas%5D%20Kusuriya%20-%20S03E06.mkv?"
+            ),
+            "{url}"
+        );
+        for key in ["a{b}.mp4", "c#d.mov", "e~f.mkv", "shows/S01/ep 1.mp4"] {
+            let url = storage.read_url("ingest", key).await.unwrap();
+            assert!(!url.contains("%25"), "{key} encoded twice: {url}");
+        }
+        assert!(storage.read_url("ingest", "a//b.mp4").await.is_err());
     }
 }

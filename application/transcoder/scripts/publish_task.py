@@ -6,7 +6,7 @@ status messages are lines in <mock-dir>/transcode.status.jsonl.
 
 Examples:
     scripts/publish_task.py samples/bars_1080p24.mp4
-    scripts/publish_task.py samples --follow          # every .mp4 in the folder
+    scripts/publish_task.py samples --follow          # every .mp4/.mov/.mkv in the folder
     scripts/publish_task.py movie.mp4 --id movie-1 --formats hls
     scripts/publish_task.py /data/in/movie.mp4        # a path only the service can see
 """
@@ -21,14 +21,16 @@ from pathlib import Path
 TASK_CHANNEL = "transcode.tasks"
 STATUS_CHANNEL = "transcode.status"
 FINAL_EVENTS = {"completed", "failed", "rejected", "skipped"}
+# The file types the transcoder accepts (pubsub::VIDEO_EXTENSIONS).
+VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv"}
 
 
 def find_inputs(paths):
-    """Files as given; folders expand to the .mp4 files directly inside them."""
+    """Files as given; folders expand to the video files directly inside them."""
     inputs = []
     for p in map(Path, paths):
         if p.is_dir():
-            inputs.extend(sorted(f for f in p.iterdir() if f.is_file() and f.suffix.lower() == ".mp4"))
+            inputs.extend(sorted(f for f in p.iterdir() if f.is_file() and f.suffix.lower() in VIDEO_SUFFIXES))
         else:
             inputs.append(p)
     return inputs
@@ -88,7 +90,7 @@ def print_status(m):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("inputs", nargs="+", help="video files, or folders of .mp4 files")
+    parser.add_argument("inputs", nargs="+", help="video files, or folders of .mp4/.mov/.mkv files")
     parser.add_argument("--id", help="task id (only with a single input); default: <file name>-<timestamp>")
     parser.add_argument("--formats", nargs="+", choices=["hls", "dash"], help="default: whatever the service uses")
     parser.add_argument("--mock-dir", type=Path, default=Path("mock-pubsub"), help="default: mock-pubsub")
@@ -97,7 +99,7 @@ def main():
 
     inputs = find_inputs(args.inputs)
     if not inputs:
-        parser.error("no .mp4 files found")
+        parser.error("no video files (.mp4, .mov, .mkv) found")
     if args.id and len(inputs) > 1:
         parser.error("--id only works with a single input")
 
