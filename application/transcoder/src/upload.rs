@@ -132,7 +132,12 @@ impl UploadServer {
 type Reply = Response<Full<Bytes>>;
 
 async fn handle(req: Request<Incoming>, shared: Arc<Shared>) -> Result<Reply, Infallible> {
-    let Some(key) = req.uri().path().strip_prefix(&shared.prefix).map(str::to_owned) else {
+    let Some(key) = req
+        .uri()
+        .path()
+        .strip_prefix(&shared.prefix)
+        .map(str::to_owned)
+    else {
         return Ok(reply(StatusCode::NOT_FOUND, "unknown path"));
     };
     if key.is_empty() || key.split('/').any(|part| part.is_empty() || part == "..") {
@@ -145,7 +150,10 @@ async fn handle(req: Request<Incoming>, shared: Arc<Shared>) -> Result<Reply, In
             // ffmpeg sends the file with chunked encoding (length unknown in
             // advance), and S3 wants the length up front: so collect this one
             // file, upload it, and only then answer ffmpeg.
-            let body = match Limited::new(req.into_body(), MAX_FILE_BYTES).collect().await {
+            let body = match Limited::new(req.into_body(), MAX_FILE_BYTES)
+                .collect()
+                .await
+            {
                 Ok(body) => body.to_bytes(),
                 Err(e) => {
                     record(&shared, &group, 0, Some(format!("receiving {key}: {e}")));

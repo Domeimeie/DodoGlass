@@ -112,7 +112,11 @@ mod tests {
         let payload = br#"{"Records":[
             {"data":{"s3":{"bucket":{"name":"ingest"},"object":{"key":"a.mp4","size":1}}}},
             {"data":{"s3":{"bucket":{"name":"ingest"},"object":{"key":"b.mkv","size":2}}}}]}"#;
-        let keys: Vec<_> = objects(payload).unwrap().into_iter().map(|o| o.key).collect();
+        let keys: Vec<_> = objects(payload)
+            .unwrap()
+            .into_iter()
+            .map(|o| o.key)
+            .collect();
         assert_eq!(keys, ["a.mp4", "b.mkv"]);
     }
 

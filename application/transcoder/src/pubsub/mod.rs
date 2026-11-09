@@ -77,11 +77,8 @@ pub const VIDEO_EXTENSIONS: [&str; 3] = ["mp4", "mov", "mkv"];
 
 /// Whether a file or object name ends in one of [`VIDEO_EXTENSIONS`] (any case).
 pub fn is_video_name(name: &str) -> bool {
-    name.rsplit_once('.').is_some_and(|(_, ext)| {
-        VIDEO_EXTENSIONS
-            .iter()
-            .any(|v| ext.eq_ignore_ascii_case(v))
-    })
+    name.rsplit_once('.')
+        .is_some_and(|(_, ext)| VIDEO_EXTENSIONS.iter().any(|v| ext.eq_ignore_ascii_case(v)))
 }
 
 /// Runs a function once, when the last clone of this handle is dropped. The

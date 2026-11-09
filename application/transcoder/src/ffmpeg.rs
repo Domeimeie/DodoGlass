@@ -391,9 +391,15 @@ mod tests {
             redact(&format!("Input #0, mov, from '{url}':")),
             "Input #0, mov, from 'http://localhost:9000/ingest/a.mp4?<signature redacted>':"
         );
-        assert_eq!(redact(&format!("-i {url} -f hls")), "-i http://localhost:9000/ingest/a.mp4?<signature redacted> -f hls");
+        assert_eq!(
+            redact(&format!("-i {url} -f hls")),
+            "-i http://localhost:9000/ingest/a.mp4?<signature redacted> -f hls"
+        );
         assert_eq!(redact("plain line, no url?"), "plain line, no url?");
-        assert_eq!(redact("what? X-Amz-Date is mentioned"), "what? X-Amz-Date is mentioned");
+        assert_eq!(
+            redact("what? X-Amz-Date is mentioned"),
+            "what? X-Amz-Date is mentioned"
+        );
     }
 
     #[test]
@@ -424,7 +430,11 @@ mod tests {
             assert!(job.args.contains(&"If-Match: \"abc-2\"\r\n".to_string()));
             assert!(!job.command_line().contains("X-Amz-Signature"));
         }
-        assert!(jobs[0].args.contains(&"http://127.0.0.1:1234/tok/a/hls/%v/seg_%03d.ts".to_string()));
+        assert!(
+            jobs[0]
+                .args
+                .contains(&"http://127.0.0.1:1234/tok/a/hls/%v/seg_%03d.ts".to_string())
+        );
         assert_eq!(jobs[0].manifest.display(), "s3://final/a/hls/master.m3u8");
         assert_eq!(jobs[1].manifest.display(), "s3://final/a/dash/manifest.mpd");
     }
@@ -446,7 +456,9 @@ mod tests {
             out_dir: OutDir::Local("out/a".into()),
             source: Ok(src.clone()),
         };
-        let args = build_jobs(0, &video, &src, &cfg, &[Format::Hls])[0].args.join(" ");
+        let args = build_jobs(0, &video, &src, &cfg, &[Format::Hls])[0]
+            .args
+            .join(" ");
         assert!(!args.contains("-method"));
         assert!(!args.contains("-reconnect"));
     }

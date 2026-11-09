@@ -321,12 +321,9 @@ impl Background {
         let mut status = StatusMessage::new(&self.worker, task, StatusEvent::Rejected);
         status.error = Some(reason);
         if let Ok(json) = serde_json::to_vec(&status) {
-            let _ = self.client.try_publish(
-                &self.settings.status_topic,
-                QoS::AtLeastOnce,
-                false,
-                json,
-            );
+            let _ =
+                self.client
+                    .try_publish(&self.settings.status_topic, QoS::AtLeastOnce, false, json);
         }
     }
 }

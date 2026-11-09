@@ -79,11 +79,19 @@ struct Cli {
     mock_dir: PathBuf,
 
     /// MQTT broker (with --pubsub mqtt)
-    #[arg(long, env = "TRANSCODER_MQTT_URL", default_value = "mqtt://localhost:1883")]
+    #[arg(
+        long,
+        env = "TRANSCODER_MQTT_URL",
+        default_value = "mqtt://localhost:1883"
+    )]
     mqtt_url: String,
 
     /// Topic the bucket events arrive on
-    #[arg(long, env = "TRANSCODER_MQTT_TOPIC", default_value = "dodoglass/ingest")]
+    #[arg(
+        long,
+        env = "TRANSCODER_MQTT_TOPIC",
+        default_value = "dodoglass/ingest"
+    )]
     mqtt_topic: String,
 
     /// Shared-subscription group: workers in one group split the events between them
@@ -91,11 +99,19 @@ struct Cli {
     mqtt_group: String,
 
     /// Topic status messages are published to
-    #[arg(long, env = "TRANSCODER_MQTT_STATUS_TOPIC", default_value = "dodoglass/status")]
+    #[arg(
+        long,
+        env = "TRANSCODER_MQTT_STATUS_TOPIC",
+        default_value = "dodoglass/status"
+    )]
     mqtt_status_topic: String,
 
     /// Workers register (retained) below this topic
-    #[arg(long, env = "TRANSCODER_MQTT_WORKERS_TOPIC", default_value = "dodoglass/workers")]
+    #[arg(
+        long,
+        env = "TRANSCODER_MQTT_WORKERS_TOPIC",
+        default_value = "dodoglass/workers"
+    )]
     mqtt_workers_topic: String,
 
     /// S3 endpoint for inputs in buckets and for --output-bucket, e.g. http://localhost:9000
@@ -107,7 +123,12 @@ struct Cli {
     s3_access_key: Option<String>,
 
     /// S3 secret key (prefer the environment variable: arguments are visible in `ps`)
-    #[arg(long, env = "TRANSCODER_S3_SECRET_KEY", hide_env_values = true, requires = "s3_endpoint")]
+    #[arg(
+        long,
+        env = "TRANSCODER_S3_SECRET_KEY",
+        hide_env_values = true,
+        requires = "s3_endpoint"
+    )]
     s3_secret_key: Option<String>,
 
     /// S3 region
@@ -335,7 +356,10 @@ fn run_service(cli: Cli) -> Result<bool> {
     init_logging(cli.log_format);
     let config = Config::load(cli.config.as_deref())?;
     let slots = cli.threads as usize;
-    let worker_id = cli.worker_id.clone().unwrap_or_else(service::default_worker_id);
+    let worker_id = cli
+        .worker_id
+        .clone()
+        .unwrap_or_else(service::default_worker_id);
 
     let storage = match &cli.s3_endpoint {
         Some(endpoint) => Some(Arc::new(storage::Storage::new(storage::S3Settings {

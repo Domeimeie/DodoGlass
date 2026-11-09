@@ -17,7 +17,9 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 use crate::config::Config;
 use crate::ffmpeg::{self, Format, OutDir, Video};
 use crate::probe;
-use crate::pubsub::{Input, PubSub, Publisher, StatusEvent, StatusMessage, Task, WorkerInfo, now_ms};
+use crate::pubsub::{
+    Input, PubSub, Publisher, StatusEvent, StatusMessage, Task, WorkerInfo, now_ms,
+};
 use crate::runner::{self, Event, Outcome};
 use crate::storage::Storage;
 use crate::upload::UploadServer;
@@ -213,8 +215,13 @@ async fn handle_task<P: Publisher + Clone>(
     let marker_key = format!("{}/{SOURCE_MARKER}", task.id);
 
     // Unchanged re-upload (same eTag, same formats): nothing to do.
-    if let (Output::Bucket(uploads), Some(storage), Input::Object { etag: Some(etag), .. }) =
-        (&s.output, &s.storage, &task.input)
+    if let (
+        Output::Bucket(uploads),
+        Some(storage),
+        Input::Object {
+            etag: Some(etag), ..
+        },
+    ) = (&s.output, &s.storage, &task.input)
     {
         match storage.get_small(uploads.bucket(), &marker_key).await {
             Ok(Some(json)) => match serde_json::from_slice::<SourceMarker>(&json) {
@@ -253,7 +260,8 @@ async fn handle_task<P: Publisher + Clone>(
         Input::File(_) => None,
     };
     let (probe_input, probe_etag) = (input.clone(), input_etag.clone());
-    let probed = tokio::task::spawn_blocking(move || probe::probe(&probe_input, probe_etag.as_deref()));
+    let probed =
+        tokio::task::spawn_blocking(move || probe::probe(&probe_input, probe_etag.as_deref()));
     let source = match probed.await {
         Ok(Ok(source)) => source,
         Ok(Err(e)) => return fail(&publish, status(StatusEvent::Failed), format!("{e:#}")).await,
@@ -400,7 +408,9 @@ async fn handle_task<P: Publisher + Clone>(
         }
     }
 
-    if let (Output::Bucket(uploads), Some(storage), Some(etag)) = (&s.output, &s.storage, input_etag) {
+    if let (Output::Bucket(uploads), Some(storage), Some(etag)) =
+        (&s.output, &s.storage, input_etag)
+    {
         let marker = SourceMarker {
             input: task.input.to_string(),
             etag,
@@ -409,7 +419,10 @@ async fn handle_task<P: Publisher + Clone>(
             worker: s.worker_id.clone(),
         };
         let json = serde_json::to_vec_pretty(&marker).unwrap_or_default();
-        if let Err(e) = storage.put(uploads.bucket(), &marker_key, json.into()).await {
+        if let Err(e) = storage
+            .put(uploads.bucket(), &marker_key, json.into())
+            .await
+        {
             // The output is complete; only the next identical upload won't be skipped.
             warn!(error = format!("{e:#}"), "cannot write {SOURCE_MARKER}");
         }

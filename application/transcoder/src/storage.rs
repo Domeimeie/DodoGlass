@@ -11,9 +11,7 @@ use futures_util::StreamExt;
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::path::Path;
 use object_store::signer::{Method, Signer};
-use object_store::{
-    Attribute, Attributes, ObjectStore, ObjectStoreExt, PutOptions, PutPayload,
-};
+use object_store::{Attribute, Attributes, ObjectStore, ObjectStoreExt, PutOptions, PutPayload};
 
 /// How long a presigned read URL stays valid. ffmpeg keeps using the URL for
 /// the whole transcode (every read is a new range request), so this must be
@@ -110,9 +108,11 @@ impl Storage {
     /// Reads a small object completely; `None` if it does not exist.
     pub async fn get_small(&self, bucket: &str, key: &str) -> Result<Option<Bytes>> {
         match self.bucket(bucket)?.get(&object_path(key)).await {
-            Ok(result) => Ok(Some(result.bytes().await.with_context(|| {
-                format!("cannot read s3://{bucket}/{key}")
-            })?)),
+            Ok(result) => {
+                Ok(Some(result.bytes().await.with_context(|| {
+                    format!("cannot read s3://{bucket}/{key}")
+                })?))
+            }
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(e) => Err(e).with_context(|| format!("cannot read s3://{bucket}/{key}")),
         }
@@ -169,9 +169,15 @@ mod tests {
     #[test]
     fn content_types() {
         assert_eq!(content_type("a/hls/720p/seg_001.ts"), "video/mp2t");
-        assert_eq!(content_type("a/hls/master.m3u8"), "application/vnd.apple.mpegurl");
+        assert_eq!(
+            content_type("a/hls/master.m3u8"),
+            "application/vnd.apple.mpegurl"
+        );
         assert_eq!(content_type("a/dash/manifest.mpd"), "application/dash+xml");
-        assert_eq!(content_type("a/dash/chunk-stream0-00001.m4s"), "video/iso.segment");
+        assert_eq!(
+            content_type("a/dash/chunk-stream0-00001.m4s"),
+            "video/iso.segment"
+        );
         assert_eq!(content_type("README"), "application/octet-stream");
     }
 
@@ -188,10 +194,22 @@ mod tests {
             region: "us-east-1".into(),
         });
         let data = Bytes::from_static(b"x");
-        storage.put("ingest", "sample.mp4", data.clone()).await.unwrap();
-        storage.put("final", "sample/dash/a.m4s", data.clone()).await.unwrap();
-        storage.put("final", "sample/dash/b.m4s", data.clone()).await.unwrap();
-        storage.put("final", "sample/hls/master.m3u8", data).await.unwrap();
+        storage
+            .put("ingest", "sample.mp4", data.clone())
+            .await
+            .unwrap();
+        storage
+            .put("final", "sample/dash/a.m4s", data.clone())
+            .await
+            .unwrap();
+        storage
+            .put("final", "sample/dash/b.m4s", data.clone())
+            .await
+            .unwrap();
+        storage
+            .put("final", "sample/hls/master.m3u8", data)
+            .await
+            .unwrap();
 
         let deleted = storage.delete_prefix("final", "sample/dash").await.unwrap();
         assert_eq!(deleted, 2);
@@ -207,7 +225,11 @@ mod tests {
             }
         };
         assert_eq!(keys("final").await, ["sample/hls/master.m3u8"]);
-        assert_eq!(keys("ingest").await, ["sample.mp4"], "the input was deleted too");
+        assert_eq!(
+            keys("ingest").await,
+            ["sample.mp4"],
+            "the input was deleted too"
+        );
     }
 
     #[tokio::test]
@@ -219,7 +241,10 @@ mod tests {
             region: "us-east-1".into(),
         });
         let url = storage.read_url("ingest", "my movie.mp4").await.unwrap();
-        assert!(url.starts_with("http://localhost:9000/ingest/my%20movie.mp4?"), "{url}");
+        assert!(
+            url.starts_with("http://localhost:9000/ingest/my%20movie.mp4?"),
+            "{url}"
+        );
         assert!(url.contains("X-Amz-Signature="));
         assert!(!url.contains("very-secret"));
     }
