@@ -111,9 +111,10 @@ go-task infra:upload -- application/transcoder/sample.mp4   # from the repositor
 ```
 
 Each upload of a `.mp4`, `.mov` or `.mkv` to `ingest` becomes a task; the result goes to
-`final/<name>/hls/` and `final/<name>/dash/`, and the original is removed from `ingest` (unless
-`--keep-input`). Uploading the same file again is skipped; a different file with the same name
-replaces the result. Details: [architecture page](../../docs/architecture/transcoder.md#the-mqtt-backend).
+`final/<task id>/hls/` and `final/<task id>/dash/` (`sample.mp4` → `final/sample-de8f39c7/`, see
+[task ids](../../docs/architecture/transcoder.md#task-ids)), and the original is removed from
+`ingest` (unless `--keep-input`). Uploading the same file again is skipped; a different file with
+the same key replaces the result. Details: [architecture page](../../docs/architecture/transcoder.md#the-mqtt-backend).
 
 ### On the mock PubSub
 

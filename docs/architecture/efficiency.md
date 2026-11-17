@@ -40,7 +40,7 @@ What the numbers show:
 flowchart LR
     subgraph Storage["RustFS"]
         Ingest[("ingest/<br/>movie.mp4  3 GB")]
-        Final[("final/movie/<br/>hls/ dash/")]
+        Final[("final/movie-bdc80faa/<br/>hls/ dash/")]
     end
     subgraph Host["transcoder host (no video on disk)"]
         Svc["transcoder<br/>42 MB"]
@@ -106,7 +106,7 @@ request to be signed, which ffmpeg cannot do, so the transcoder runs a small HTT
 
 ## 3. No unnecessary work
 
-- **Duplicates are skipped.** A completed task leaves `final/<name>/source.json` with the input's
+- **Duplicates are skipped.** A completed task leaves `final/<task id>/source.json` with the input's
   eTag. Uploading the same file again costs reading that one small file instead of a full transcode:
   for the 3 GB video, a fraction of a second instead of 176 s on 16 CPU cores. Different content with the same name is transcoded
   and replaces the old result ([details](transcoder.md#duplicates-and-replacing)).

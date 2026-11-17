@@ -219,7 +219,40 @@ A **task** (JSON, mock):
 
 Over MQTT the task is not sent in this form: it is made from the **S3 event** RustFS publishes when
 an upload completes (see [Infrastructure](infrastructure.md#the-event-message)). The id comes from
-the key: `shows/Episode 1.mkv` → `shows_Episode_1`.
+the key, see [Task ids](#task-ids).
+
+### Task ids
+
+A task from an S3 event gets its id from the object key, with `task_id_from_key` from the shared
+crate `application/dodoglass-ids` (ADR 0004). The asset server uses the same crate, so both derive
+the same id, and therefore the same `final/<id>/` folder, from a key.
+
+```
+<readable prefix>-<first 8 hex digits of SHA-256 over the key in Unicode NFC>
+```
+
+| Key | Task id |
+|---|---|
+| `sample.mp4` | `sample-de8f39c7` |
+| `movies/The Matrix (1999)/matrix.mkv` | `movies_The_Matrix__1999__matrix-48c3476c` |
+| `movies/The Matrix (1999)/matrix.mp4` | `movies_The_Matrix__1999__matrix-a8bb2d22` |
+| `movies/Amélie (2001)/amelie.mkv` | `movies_Am_lie__2001__amelie-7657ef7e` |
+| `movies/Am lie (2001)/amelie.mkv` | `movies_Am_lie__2001__amelie-a60c1094` |
+
+- **The readable prefix** keeps `final/` browsable: the key without its extension, every character
+  other than ASCII letters, digits, `-`, `_` and `.` replaced by `_` (folders included), leading dots
+  trimmed, and `video` if nothing is left. On its own it is not unique.
+- **The hash** covers the whole key, extension and folders included, so `matrix.mkv` and
+  `matrix.mp4` in the same folder, or `Amélie` and `Am lie`, get separate outputs instead of one
+  silently replacing the other.
+- **NFC:** the key is normalised before hashing, so an `é` typed as one character (NFC) or as `e` plus
+  an accent (NFD, as macOS file names often are) gives the same id.
+- The same key always gives the same id, so re-uploading to the same path still lands in the same
+  folder and follows the [duplicate rules](#duplicates-and-replacing).
+
+**Changing the id format moves every output.** When it changed to this format, the existing
+outputs were not migrated: delete everything in the `final` bucket by hand (for example with
+`mc rm --recursive --force <alias>/final`) and upload the videos to `ingest` again.
 
 A **status message** (one per event):
 
@@ -358,8 +391,9 @@ to that bucket instead of `--out`. How this avoids the disk entirely is explaine
 
 ### Duplicates and replacing
 
-The task id comes from the object's name, so the **name is the identity of a video**: uploading
-`sample.mp4` again means "new version of `sample`", and its result in `final/sample/` is replaced.
+The task id comes from the object's key, so the **key is the identity of a video**: uploading
+`sample.mp4` again means "new version of `sample.mp4`", and its result in `final/sample-de8f39c7/` is
+replaced. `sample.mkv` is a different video with its own folder.
 
 | Upload | Result |
 |---|---|
@@ -368,8 +402,10 @@ The task id comes from the object's name, so the **name is the identity of a vid
 | the same name, different content | transcoded, the old result replaced |
 | the same name while it is being transcoded | waits for the running task, then one of the above |
 
-- After a task completed, `final/<id>/source.json` records the input, its **eTag** and the formats.
-  An event with the same eTag and formats is skipped. The marker is deleted before a replacement
+- After a task completed, `final/<id>/source.json` records the input (`{"bucket", "key"}`), its
+  **eTag** and the formats. An event for the same bucket and key with the same eTag and formats is
+  skipped. A marker in the old format (input as a `s3://…` string) is unreadable, so that video is
+  transcoded again. The marker is deleted before a replacement
   starts, so a half-replaced output is never taken for complete.
 - **At most one task per id at a time:** a second one waits (keeping its slot) instead of running in
   parallel and deleting the other's files.
@@ -522,12 +558,13 @@ With `--output-bucket` the same layout is in the bucket, plus the marker of the 
 from:
 
 ```
-s3://final/<task id>/
+s3://final/<task id>/        ← e.g. movies_The_Matrix__1999__matrix-48c3476c/
 ├── hls/ …                   ← as above
 ├── dash/ …
-└── source.json              ← {"input", "etag", "formats", "completed_ms", "worker"}
+└── source.json              ← {"input": {"bucket", "key"}, "etag", "formats", "completed_ms", "worker"}
 ```
 
 Every job deletes and recreates its own `hls/` or `dash/` folder (in a bucket: the objects below
-that prefix), so segments from an earlier run with a different ladder never mix in. Two input files whose names differ only in case (`a.mp4`, `a.MP4`)
-would share an output folder and are rejected.
+that prefix), so segments from an earlier run with a different ladder never mix in. On disk (local
+files, not tasks from a bucket) the folder is the file name without extension: two input files whose
+names differ only in case (`a.mp4`, `a.MP4`) would share an output folder and are rejected.
