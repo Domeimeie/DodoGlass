@@ -1,0 +1,9 @@
+[package]
+name = "dodoglass-ids"
+version = "0.1.0"
+edition = "2024"
+description = "Ids shared by the transcoder and the asset server"
+
+[dependencies]
+sha2 = "0.10.9"
+unicode-normalization = "0.1"
