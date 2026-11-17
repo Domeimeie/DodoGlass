@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use dodoglass_ids::task_id_from_key;
 use rumqttc::Outgoing;
 use rumqttc::v5::mqttbytes::QoS;
 use rumqttc::v5::mqttbytes::v5::{LastWill, Packet, Publish};
@@ -33,7 +34,6 @@ use tracing::{debug, info, warn};
 
 use super::{
     Ack, Input, PubSub, Publisher, StatusEvent, StatusMessage, Task, WorkerInfo, s3_event,
-    task_id_from_key,
 };
 
 /// Requests rumqttc buffers between the client handles and the event loop.

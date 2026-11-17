@@ -146,32 +146,6 @@ impl Task {
     }
 }
 
-/// A task id (also the output folder name) from an object key:
-/// "shows/Episode 1.mkv" -> "shows_Episode_1". Characters other than letters,
-/// digits, '-', '_' and '.' become '_'.
-pub fn task_id_from_key(key: &str) -> String {
-    let stem = match key.rsplit_once('.') {
-        Some((stem, _)) if !stem.is_empty() => stem,
-        _ => key,
-    };
-    let id: String = stem
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || "-_.".contains(c) {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let id = id.trim_start_matches('.');
-    if id.is_empty() {
-        "video".into()
-    } else {
-        id.into()
-    }
-}
-
 /// What a worker announces when it registers.
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkerInfo {
@@ -264,16 +238,6 @@ pub fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[test]
-    fn task_ids_from_keys() {
-        assert_eq!(task_id_from_key("sample.mp4"), "sample");
-        assert_eq!(task_id_from_key("shows/Episode 1.mkv"), "shows_Episode_1");
-        assert_eq!(task_id_from_key("café.mov"), "caf_");
-        assert_eq!(task_id_from_key(".hidden.mp4"), "hidden");
-        assert_eq!(task_id_from_key(".mp4"), "mp4");
-        assert_eq!(task_id_from_key("..."), "video");
-    }
 
     #[test]
     fn video_names() {

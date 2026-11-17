@@ -81,14 +81,38 @@ impl Context {
 
 /// Written to `<output>/<task id>/source.json` after a task completed: which
 /// version of which input the output was made from. A new event for the same
-/// version (same eTag) and formats is then skipped.
+/// version (same eTag) and formats is then skipped. The asset server reads it
+/// too, to learn which upload an output belongs to.
+///
+/// ```json
+/// {"input": {"bucket": "ingest", "key": "sample.mp4"}, "etag": "…",
+///  "formats": ["hls", "dash"], "completed_ms": 1793128170038, "worker": "worker-1"}
+/// ```
 #[derive(Debug, Serialize, Deserialize)]
 struct SourceMarker {
-    input: String,
+    input: SourceObject,
     etag: String,
     formats: Vec<Format>,
     completed_ms: u64,
     worker: String,
+}
+
+/// The object an output was made from.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct SourceObject {
+    bucket: String,
+    key: String,
+}
+
+impl SourceMarker {
+    /// Whether this output was made from exactly this version of this object,
+    /// in these formats, so transcoding it again would change nothing.
+    fn describes(&self, bucket: &str, key: &str, etag: &str, formats: &[Format]) -> bool {
+        self.input.bucket == bucket
+            && self.input.key == key
+            && self.etag == etag
+            && self.formats == formats
+    }
 }
 
 const SOURCE_MARKER: &str = "source.json";
@@ -222,13 +246,15 @@ async fn handle_task<P: Publisher + Clone>(
         Output::Bucket(uploads),
         Some(storage),
         Input::Object {
-            etag: Some(etag), ..
+            bucket,
+            key,
+            etag: Some(etag),
         },
     ) = (&s.output, &s.storage, &task.input)
     {
         match storage.get_small(uploads.bucket(), &marker_key).await {
             Ok(Some(json)) => match serde_json::from_slice::<SourceMarker>(&json) {
-                Ok(m) if m.etag == *etag && m.formats == formats => {
+                Ok(m) if m.describes(bucket, key, etag, &formats) => {
                     info!(%etag, "unchanged since the last transcode, skipped");
                     consume_input(&task, s).await;
                     return publish(status(StatusEvent::Skipped)).await;
@@ -412,12 +438,22 @@ async fn handle_task<P: Publisher + Clone>(
         }
     }
 
-    if let (Output::Bucket(uploads), Some(storage), Some(etag)) =
-        (&s.output, &s.storage, input_etag)
+    if let (
+        Output::Bucket(uploads),
+        Some(storage),
+        Input::Object {
+            bucket,
+            key,
+            etag: Some(etag),
+        },
+    ) = (&s.output, &s.storage, &task.input)
     {
         let marker = SourceMarker {
-            input: task.input.to_string(),
-            etag,
+            input: SourceObject {
+                bucket: bucket.clone(),
+                key: key.clone(),
+            },
+            etag: etag.clone(),
             formats,
             completed_ms: now_ms(),
             worker: s.worker_id.clone(),
@@ -484,4 +520,57 @@ pub fn default_worker_id() -> String {
         .filter(|h| !h.is_empty())
         .unwrap_or_else(|| "worker".into());
     format!("{host}-{}", std::process::id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn marker(bucket: &str, key: &str, etag: &str) -> SourceMarker {
+        SourceMarker {
+            input: SourceObject {
+                bucket: bucket.into(),
+                key: key.into(),
+            },
+            etag: etag.into(),
+            formats: vec![Format::Hls, Format::Dash],
+            completed_ms: 1793128170038,
+            worker: "worker-1".into(),
+        }
+    }
+
+    #[test]
+    fn marker_records_the_input_as_bucket_and_key() {
+        let json = serde_json::to_value(marker("ingest", "movies/a (2001)/a.mkv", "e1")).unwrap();
+        assert_eq!(
+            json["input"],
+            serde_json::json!({"bucket": "ingest", "key": "movies/a (2001)/a.mkv"})
+        );
+    }
+
+    #[test]
+    fn marker_from_json_skips_the_same_version() {
+        let json = br#"{"input": {"bucket": "ingest", "key": "a.mkv"}, "etag": "e1",
+            "formats": ["hls", "dash"], "completed_ms": 1, "worker": "w"}"#;
+        let m: SourceMarker = serde_json::from_slice(json).unwrap();
+        let formats = [Format::Hls, Format::Dash];
+        assert!(m.describes("ingest", "a.mkv", "e1", &formats));
+    }
+
+    #[test]
+    fn marker_does_not_skip_another_version_input_or_formats() {
+        let m = marker("ingest", "a.mkv", "e1");
+        let both = [Format::Hls, Format::Dash];
+        assert!(!m.describes("ingest", "a.mkv", "e2", &both));
+        assert!(!m.describes("ingest", "a.mp4", "e1", &both));
+        assert!(!m.describes("other", "a.mkv", "e1", &both));
+        assert!(!m.describes("ingest", "a.mkv", "e1", &[Format::Hls]));
+    }
+
+    #[test]
+    fn marker_with_a_display_string_input_is_unreadable() {
+        let old = br#"{"input": "s3://ingest/a.mkv", "etag": "e1",
+            "formats": ["hls"], "completed_ms": 1, "worker": "w"}"#;
+        assert!(serde_json::from_slice::<SourceMarker>(old).is_err());
+    }
 }
