@@ -5,6 +5,7 @@ site_dir: site
 nav:
   - Architecture: architecture.md
   - Transcoder: transcoder.md
+  - Asset server: asset-server.md
   - Infrastructure: infrastructure.md
   - Efficiency: efficiency.md
   - Setup: setup.md
