@@ -2,7 +2,7 @@
 name = "dodoglass-ids"
 version = "0.1.0"
 edition = "2024"
-description = "Ids shared by the transcoder and the asset server"
+description = "Task ids and upload path placement shared by the transcoder and the asset server"
 
 [dependencies]
 sha2 = "0.10.9"

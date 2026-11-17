@@ -1,5 +1,10 @@
-//! Ids shared by the transcoder and the asset server. Both derive the same
-//! task id from an upload key, so the function lives here (ADR 0004).
+//! What the transcoder and the asset server both read from an upload key:
+//! the task id, which both must derive the same way (ADR 0004), and where the
+//! upload belongs in the catalogue (ADR 0003).
+
+mod upload_path;
+
+pub use upload_path::{Placement, UnassignedReason, place_upload};
 
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
