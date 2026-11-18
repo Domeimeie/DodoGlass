@@ -200,6 +200,19 @@ impl TestApp {
         body
     }
 
+    /// GET of anything that is not JSON (images): status, content type, body.
+    pub async fn get_bytes(&self, uri: &str) -> (StatusCode, Option<String>, Vec<u8>) {
+        let request = Request::get(uri).body(Body::empty()).unwrap();
+        let response = self.router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .map(|v| v.to_str().unwrap().to_string());
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, content_type, bytes.to_vec())
+    }
+
     pub async fn send_json(&self, method: &str, uri: &str, body: Value) -> (StatusCode, Value) {
         self.request(
             Request::builder()

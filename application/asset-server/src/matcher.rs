@@ -135,7 +135,7 @@ impl Matcher {
         };
         let details = self.tmdb.movie(only.tmdb_id).await?;
         let image_key = match &details.poster_path {
-            Some(path) => Some(self.download(path).await?),
+            Some(path) => self.download(path).await?,
             None => None,
         };
         Ok(Outcome::Matched(MovieMatch {
@@ -149,19 +149,27 @@ impl Matcher {
     }
 
     /// Downloads the image at TMDB `path` (original size) into `assets`;
-    /// returns its key there.
-    async fn download(&self, path: &str) -> Result<String, LookupError> {
-        let key = image_key(path).ok_or_else(|| {
-            LookupError::Review(format!("TMDB image path {path:?} is not a file name"))
-        })?;
-        let bytes = self.tmdb.image(path).await?;
-        let location = Path::parse(&key)
-            .map_err(|e| LookupError::Review(format!("image key {key:?}: {e}")))?;
+    /// returns its key there, or `None` when TMDB has no image to give (the
+    /// Movie is matched without one rather than held back for it).
+    async fn download(&self, path: &str) -> Result<Option<String>, LookupError> {
+        let Some(key) = image_key(path) else {
+            warn!(path, "TMDB image path is not a plain file name, skipped");
+            return Ok(None);
+        };
+        let bytes = match self.tmdb.image(path).await {
+            Ok(bytes) => bytes,
+            Err(TmdbError::Rejected(e)) => {
+                warn!(path, error = %e, "poster not available, skipped");
+                return Ok(None);
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let location = Path::parse(&key).expect("image keys are plain file names");
         self.assets
             .put(&location, PutPayload::from(bytes))
             .await
             .map_err(|e| LookupError::Retry(format!("cannot store {key}: {e}")))?;
-        Ok(key)
+        Ok(Some(key))
     }
 }
 

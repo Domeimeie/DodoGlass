@@ -5,6 +5,8 @@ mod common;
 
 use std::time::Duration;
 
+use asset_server::ports::tmdb::MovieDetails;
+use axum::http::StatusCode;
 use common::TestApp;
 use common::tmdb::movie;
 use serde_json::json;
@@ -33,6 +35,69 @@ async fn one_exact_result_is_matched_and_fills_the_movie() {
     assert_eq!(listed["tmdb_id"], json!(603));
     assert_eq!(listed["imdb_id"], json!("tt0000603"));
     assert_eq!(listed["description"], json!("About The Matrix."));
+}
+
+#[tokio::test]
+async fn the_poster_is_downloaded_and_served_from_images() {
+    let app = TestApp::start().await;
+    app.tmdb.add_movie(MovieDetails {
+        poster_path: Some("/f89U3ADr1oiB1s9GkdPOEpXUk5H.jpg".into()),
+        ..movie(603, "The Matrix", 1999)
+    });
+    app.tmdb
+        .add_image("/f89U3ADr1oiB1s9GkdPOEpXUk5H.jpg", b"the poster");
+
+    ready_movie(&app, MATRIX).await;
+
+    let image = app.get_json("/movies").await[0]["image"].clone();
+    let key = image.as_str().expect("an image key");
+    let (status, content_type, body) = app.get_bytes(&format!("/images/{key}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(content_type.as_deref(), Some("image/jpeg"));
+    assert_eq!(body, b"the poster");
+
+    app.tmdb.set_unreachable(true);
+    let (status, _, body) = app.get_bytes(&format!("/images/{key}")).await;
+    assert_eq!(
+        (status, body.as_slice()),
+        (StatusCode::OK, &b"the poster"[..])
+    );
+}
+
+#[tokio::test]
+async fn a_movie_without_a_poster_on_tmdb_has_no_image() {
+    let app = TestApp::start().await;
+    app.tmdb.add_movie(movie(603, "The Matrix", 1999));
+
+    ready_movie(&app, MATRIX).await;
+
+    let listed = &app.get_json("/movies").await[0];
+    assert_eq!(listed["tmdb_id"], json!(603));
+    assert_eq!(listed.get("image"), None);
+}
+
+#[tokio::test]
+async fn a_poster_tmdb_cannot_serve_still_matches_without_an_image() {
+    let app = TestApp::start().await;
+    app.tmdb.add_movie(MovieDetails {
+        poster_path: Some("/gone.jpg".into()),
+        ..movie(603, "The Matrix", 1999)
+    });
+
+    ready_movie(&app, MATRIX).await;
+
+    let listed = &app.get_json("/movies").await[0];
+    assert_eq!(listed["tmdb_id"], json!(603));
+    assert_eq!(listed.get("image"), None);
+}
+
+#[tokio::test]
+async fn an_unknown_image_is_not_found() {
+    let app = TestApp::start().await;
+
+    let (status, _, _) = app.get_bytes("/images/posters/nothing.jpg").await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
