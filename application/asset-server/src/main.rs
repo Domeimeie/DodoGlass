@@ -26,7 +26,7 @@ struct Cli {
     database: String,
 
     /// Address the HTTP API listens on. There is no authentication: keep it on localhost
-    #[arg(long, env = "ASSETS_HTTP_ADDR", default_value = "127.0.0.1:8080")]
+    #[arg(long, env = "ASSETS_HTTP_ADDR", default_value = "127.0.0.1:8090")]
     http_addr: SocketAddr,
 
     /// MQTT broker the bucket events arrive through

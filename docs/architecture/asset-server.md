@@ -1,6 +1,6 @@
 # Asset server
 
-**Status: designed, not built yet.**
+**Status: partly built.** See [Built so far](#built-so-far).
 
 The asset server owns the **catalogue**: which Movies, Shows, Seasons and Episodes exist, their
 descriptive information (name, year, imdbID, description, image) and which Media files belong to
@@ -17,6 +17,35 @@ in `docs/adr/` (ADR 0001–0004).
 | Metadata | [TMDB](https://www.themoviedb.org), one configurable language (default `en-US`) |
 | Images | bucket `assets`, original size from TMDB |
 | Runs | natively, `go-task` task, like the transcoder; migrations run at startup |
+
+## Built so far
+
+The tracer bullet: a Movie upload becomes listable.
+
+- **Ingest listener** on `$share/assets/dodoglass/ingest`. It reads the standard S3 part of each
+  event, URL-decodes the keys, handles several records per message, and acknowledges a message only
+  after it is stored.
+- **Placement of Movies:** `movies/<Name> (<Year>)/<label>.<ext>` creates the Movie (or finds it) and
+  a **Processing** Media file whose id is the shared crate's task id. Keys are normalised to NFC.
+  Every other upload is stored without a Movie (Unassigned); Shows come next.
+- **Reconciler:** a Processing Media file becomes **Ready** when `final/<id>/source.json` exists, at
+  startup and every `--reconcile-interval` seconds (default 300). Its manifest keys follow the
+  `formats` in the marker.
+- **Read API:** `GET /movies` lists the Movies that are not Hidden, with their Ready Media files:
+  `[{"name", "year", "media_files": [{"id", "label", "manifests": {"hls", "dash"}}]}]`.
+- **Database:** SQLite via Diesel, migrations in portable SQL run at startup. Tables so far: `movie`
+  (with `folder_name`/`folder_year`, the placement identity, apart from the displayed `name`/`year`)
+  and `media_file`.
+
+Not built yet: Shows, several Media files and Labels per Movie, Failed and Missing, status hints,
+TMDB, images and the admin API.
+
+**Running it:** `go-task infra:up`, `go-task transcoder:serve-s3`, `go-task asset-server:serve`
+(HTTP on `127.0.0.1:8090`), then for example
+`go-task infra:upload KEY="movies/The Matrix (1999)/matrix.mkv" -- application/transcoder/sample.mp4`
+and `curl localhost:8090/movies`. Settings: `go-task asset-server:serve -- --help`, all also as
+`ASSETS_*` environment variables. Code layout and how to write tests:
+`application/asset-server/README.md`.
 
 ## Upload layout
 

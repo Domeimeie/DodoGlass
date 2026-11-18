@@ -3,7 +3,7 @@
 
 mod s3_event;
 
-use tracing::{debug, error, warn};
+use tracing::{error, info, warn};
 
 use crate::catalogue::Catalogue;
 use crate::ports::upload_events::{UploadEvents, UploadMessage};
@@ -26,7 +26,7 @@ async fn handle(catalogue: &Catalogue, message: UploadMessage) {
         }
     };
     for object in &objects {
-        debug!(bucket = %object.bucket, key = %object.key, "upload seen");
+        info!(bucket = %object.bucket, key = %object.key, "upload seen");
         if let Err(e) = catalogue.upload_seen(&object.key).await {
             // Not acknowledged: the broker delivers it again after a
             // reconnect, and placing is idempotent.

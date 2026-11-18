@@ -35,14 +35,18 @@ flowchart LR
     subgraph RustFS["RustFS (Docker)"]
         Ingest[("bucket<br/>ingest")]
         Final[("bucket<br/>final")]
+        Assets[("bucket<br/>assets")]
     end
     Ingest -.->|"event: ObjectCreated<br/>only .mp4 .mov .mkv"| Broker
     subgraph Mosquitto["Mosquitto (Docker)"]
         Broker{{"topic<br/>dodoglass/ingest"}}
     end
-    Broker -->|subscribe| T[Transcoder<br/>native]
+    Broker -->|"$share/transcoders"| T[Transcoder<br/>native]
+    Broker -->|"$share/assets"| A[Asset server<br/>native]
     Ingest -->|reads the video| T
     T -->|HLS + DASH| Final
+    Final -->|output markers| A
+    A ---|images| Assets
 ```
 
 1. A video is uploaded to the bucket `ingest`.
@@ -52,6 +56,11 @@ flowchart LR
    transcodes it and writes the result to `final`.
 
 `final` deliberately has no event rule: otherwise the transcoder's own output would trigger new jobs.
+
+The [asset server](asset-server.md) subscribes to the same topic as its own shared-subscription
+group (`assets`), so it and the transcoders each get every upload. It places the upload in the
+catalogue and marks it Ready once the transcoder's output marker is in `final`. The bucket
+`assets` holds the images it stores.
 
 All three steps are built and tested. How the transcoder does step 3 without storing the video on
 its own disk: [Transcoder](transcoder.md#inputs-and-outputs-in-buckets) and [Efficiency](efficiency.md).
@@ -133,7 +142,7 @@ in the web console works once, but cannot be reviewed or repeated on another mac
 it on every `docker compose up` instead:
 
 1. wait until RustFS answers,
-2. create `ingest` and `final` unless they exist,
+2. create `ingest`, `final` and `assets` unless they exist,
 3. set the event rule from `ingest-notification.json`. This *replaces* the bucket's whole
    notification config, so the file is the single source of truth.
 
