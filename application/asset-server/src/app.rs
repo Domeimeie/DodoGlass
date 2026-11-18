@@ -56,7 +56,7 @@ impl App {
     ) -> Result<App> {
         let database = config.database.clone();
         let db = tokio::task::spawn_blocking(move || Db::open(&database)).await??;
-        let catalogue = Catalogue::new(db.clone(), clock);
+        let catalogue = Catalogue::new(db.clone(), clock, buckets.final_.clone());
         let reconciler = Reconciler::new(
             catalogue.clone(),
             buckets.ingest,

@@ -36,7 +36,10 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   added if that is taken too). The first one uploaded is the **Default media file**. A re-upload to
   the same path keeps the id, Label and default flag and goes back to Processing. Labels and the
   default are kept per *owner* of the Media file (`media_file.is_default`, unique indexes per
-  owner), so Movies and Episodes follow the same rules.
+  owner), so Movies and Episodes follow the same rules. When the default is removed, goes
+  **Missing** or **Failed**, the oldest remaining Ready Media file (by first upload) takes over;
+  with none, a Missing or Failed default stays the default, and a removed one hands over to the
+  oldest remaining Media file whatever its state.
 - **Reconciler:** a Processing Media file becomes **Ready** when `final/<id>/source.json` exists, at
   startup and every `--reconcile-interval` seconds (default 300). Its manifest keys follow the
   `formats` in the marker. Each pass also checks the other states:
@@ -54,7 +57,7 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   ignored. Losing every hint only delays Ready until the next reconcile.
 - **Retry:** uploading to the same path again makes a Failed (or Ready) Media file Processing.
 - **Read API:** `GET /movies` lists the Movies that are not Hidden, with their Ready Media files:
-  `[{"name", "year", "media_files": [{"id", "label", "default", "manifests": {"hls", "dash"}}]}]`,
+  `[{"id", "name", "year", "media_files": [{"id", "label", "default", "manifests": {"hls", "dash"}}]}]`,
   the Media files ordered by Label. A matched Movie also has `tmdb_id`, `imdb_id`, `description`
   and `image` (left out when unknown).
   `GET /shows` → `[{"id", "name", "year"}]`, `GET /shows/{id}/seasons` → `[{"number"}]`,
@@ -76,7 +79,23 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
 - **Images:** a matched Movie's poster is downloaded once, in its original size, to
   `assets/posters/<TMDB file name>`; `GET /images/<key>` streams it. Browsing never calls TMDB.
 - **Admin API** (under `/admin`, no authentication, localhost only):
-  `GET /admin/media-files/<id>` → `{"id", "state", "error"}`, for any state, 404 for an unknown id.
+  `GET /admin/media-files/<id>` → `{"id", "key", "label", "state", "error"}` (`key`: the upload
+  key in `ingest`), for any state, 404 for an unknown id.
+  `GET /admin/media-files?state=failed,missing` → the same for every Media file in those states
+  (comma-separated; all states without `state`), by key: Failed ones with their `error`, Missing
+  ones with their `key`. 400 for an unknown state.
+  `PUT /admin/media-files/<id>/default` makes a Ready Media file the default of its Movie or Episode
+  (204; 409 if it is not Ready or is Unassigned).
+  `PATCH /admin/media-files/<id>` with `{"label"}` renames its Label (204; 409 if another Media file
+  of the same Movie or Episode has it, 400 if empty).
+  `DELETE /admin/media-files/<id>` removes it: `final/<id>/` is deleted through the storage port
+  (`source.json` first, so a removal cut short never leaves a marker for the reconciler to place
+  again), then its row. Its Movie or Episode stays, Hidden if nothing Ready is left, with its
+  metadata and Locked fields; a new upload brings it back.
+  `DELETE /admin/movies/<id>`, `/admin/shows/<id>`, `/admin/shows/<id>/seasons/<n>` and
+  `/admin/shows/<id>/seasons/<n>/episodes/<n>` delete a **Hidden** entry for good, with what is below
+  it, its metadata and its Media files (and their output in `final`); 409 if it is not Hidden. The
+  same folder uploaded again is a new entry, looked up in TMDB again.
   `GET /admin/needs-review` → `{"movies": [{"id", "name", "year", "candidates": [{"tmdb_id",
   "name", "year", "description", "poster_path"}]}]}`.
   `GET /admin/unassigned-media-files` → `[{"id", "path", "reason", "state"}]` by path, the reason
@@ -94,9 +113,8 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   `movie_metadata` (match state, retry backoff, TMDB fields, `locked_fields` as a JSON array of field
   names; no row = not looked up yet) and `movie_candidate`.
 
-Not built yet: a new default when the default goes away, TMDB for Shows, Seasons and Episodes, and
-the rest of the admin API (picking a Match, editing and locking fields, refresh, listing Failed and
-Missing Media files).
+Not built yet: TMDB for Shows, Seasons and Episodes, and the rest of the admin API (picking a
+Match, editing and locking fields, refresh, listing Hidden entries).
 
 **Running it:** `go-task infra:up`, `go-task transcoder:serve-s3`, `go-task asset-server:serve`
 (HTTP on `127.0.0.1:8090`), then for example

@@ -18,6 +18,22 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    /// The request breaks a rule of the catalogue (409).
+    pub fn conflict(message: impl Into<String>) -> Self {
+        ApiError {
+            status: StatusCode::CONFLICT,
+            message: message.into(),
+        }
+    }
+
+    /// The request itself is wrong (400).
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
 }
 
 /// Anything unexpected (database, storage) is a 500.

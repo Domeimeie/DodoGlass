@@ -65,3 +65,27 @@ impl Buckets {
         Ok(())
     }
 }
+
+/// Deletes the output of Media file `id` from `final`: everything under
+/// `<id>/`, its output marker (`<id>/source.json`) first, so that a deletion
+/// cut short never leaves a marker the reconciler would place again.
+pub async fn delete_output(final_: &dyn ObjectStore, id: &str) -> Result<()> {
+    use futures_util::TryStreamExt;
+    use object_store::ObjectStoreExt;
+    use object_store::path::Path;
+
+    async fn delete(store: &dyn ObjectStore, path: &Path) -> Result<()> {
+        match store.delete(path).await {
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    delete(final_, &Path::parse(format!("{id}/source.json"))?).await?;
+    let prefix = Path::parse(id)?;
+    let objects: Vec<_> = final_.list(Some(&prefix)).try_collect().await?;
+    for object in objects {
+        delete(final_, &object.location).await?;
+    }
+    Ok(())
+}

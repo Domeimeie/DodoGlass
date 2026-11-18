@@ -4,6 +4,7 @@
 //! Each part of the admin API is its own module with its own `routes()`
 //! (paths relative to `/admin`), merged here.
 
+mod hidden;
 mod media_files;
 mod review;
 mod unassigned;
@@ -14,6 +15,7 @@ use crate::catalogue::Catalogue;
 
 pub fn routes() -> Router<Catalogue> {
     Router::new()
+        .merge(hidden::routes())
         .merge(media_files::routes())
         .merge(review::routes())
         .merge(unassigned::routes())

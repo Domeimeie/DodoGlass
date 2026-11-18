@@ -12,6 +12,7 @@ use super::schema::{media_file, movie};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MovieView {
+    pub id: i32,
     pub name: String,
     pub year: i32,
     pub media_files: Vec<MediaFileView>,
@@ -97,6 +98,7 @@ impl Catalogue {
                 for (m, file) in rows {
                     if movies.last().is_none_or(|(last, _)| *last != m.id) {
                         let view = MovieView {
+                            id: m.id,
                             name: m.name,
                             year: m.year,
                             media_files: Vec::new(),
