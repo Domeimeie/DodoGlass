@@ -2,8 +2,8 @@
 
 The catalogue of Movies, Shows (Seasons, Episodes) and their Media files. It listens for uploads to
 the `ingest` bucket, places each one in the catalogue from its path (ADR 0003), and marks it Ready
-once the transcoder's output marker appears in `final` (ADR 0001). New Movies are matched against
-TMDB, and their posters stored in `assets`. The HTTP API serves the catalogue and the images.
+once the transcoder's output marker appears in `final` (ADR 0001). New Movies and Shows are matched against
+TMDB (a Show's Seasons and Episodes by number), and their images stored in `assets`. The HTTP API serves the catalogue and the images.
 
 Design: [Asset server architecture page](../../docs/architecture/asset-server.md). Terms:
 `GLOSSARY.md` at the repository root.
@@ -37,12 +37,12 @@ Other tasks (from this folder): `go-task test`, `go-task lint`, `go-task fmt`, `
 
 | Module | What it does |
 |---|---|
-| `catalogue/` | The core: placing uploads (`placement.rs`), Media file states, Labels and the Default media file per owner (`media_files.rs`), Movies and what viewers see (`movies.rs`), Shows, Seasons and Episodes (`shows.rs`), Unassigned media files and attaching them (`unassigned.rs`), TMDB outcomes and Locked fields (`metadata.rs`), the admin's changes: default, Labels, removing Media files, deleting Hidden entries (`admin.rs`). Everything else goes through it |
+| `catalogue/` | The core: placing uploads (`placement.rs`), Media file states, Labels and the Default media file per owner (`media_files.rs`), Movies and what viewers see (`movies.rs`), Shows, Seasons and Episodes (`shows.rs`), Unassigned media files and attaching them (`unassigned.rs`), TMDB outcomes and Locked fields of Movies (`metadata.rs`) and of Shows, Seasons and Episodes (`show_metadata.rs`), the admin's changes: default, Labels, removing Media files, deleting Hidden entries (`admin.rs`). Everything else goes through it |
 | `ports/` | Upload events (`upload_events.rs`, MQTT in `mqtt.rs`), status hints (`status_hints.rs`, MQTT in `mqtt_status.rs`), buckets (`storage.rs`), the clock (`clock.rs`), TMDB (`tmdb.rs`: the `Tmdb` trait and the reqwest client) |
 | `ingest/` | The ingest listener: S3 events → `Catalogue::upload_seen`, ack after storing |
 | `reconcile.rs` | Output markers in `final` → Ready, Missing, Failed after 24 h; unseen outputs placed from their marker |
 | `status.rs` | The status listener: `completed` → early reconcile of that Media file, `failed` → Failed |
-| `matcher.rs` | TMDB lookups for new Movies: strict Match, Needs review, retries with backoff, poster download |
+| `matcher.rs` | TMDB lookups for new Movies and Shows (strict Match, Needs review, retries with backoff), Seasons and Episodes of matched Shows by number, image download |
 | `http/` | axum routes, one module per part of the API (`movies.rs`, `shows.rs`, `images.rs`), merged in `mod.rs`. The admin API is `http/admin/` (`media_files.rs`, `hidden.rs`, `review.rs`, `unassigned.rs`), nested under `/admin`: add a module there and merge its `routes()` (paths relative to `/admin`) in `admin/mod.rs` |
 | `app.rs` | Builds everything; used by `main.rs` and by the tests |
 | `db.rs`, `migrations/` | SQLite connection, portable-SQL migrations (ADR 0002) |
@@ -81,8 +81,11 @@ What `TestApp` offers:
   `send_status(json)` (e.g. `common::status_message(key, event, error)`); each returns once the status
   listener has handled it.
 - **TMDB:** `app.tmdb` is a `FakeTmdb` (`tests/common/tmdb.rs`), empty by default (every search
-  finds nothing). `add_movie(common::tmdb::movie(603, "The Matrix", 1999))`, `add_image(path,
-  bytes)`, `set_unreachable(true)`, `calls()`.
+  finds nothing). `add_movie(common::tmdb::movie(603, "The Matrix", 1999))`,
+  `add_show(tmdb::show(1396, "Breaking Bad", 2008))`, `add_season(1396, 1, tmdb::season("Season
+  1"))`, `add_episode(1396, 1, 2, tmdb::episode(62086, "Cat's in the Bag...", "2008-01-27"))`
+  (Seasons and Episodes it lacks answer "not found"), `add_image(path, bytes)`,
+  `set_unreachable(true)`, `calls()`, `searches()`.
 - **Triggers:** `reconcile()`, `match_metadata()` (one pass of TMDB lookups and due retries),
   `restart()` (same database and buckets, so the startup reconcile runs:
   "the asset server was down"), `advance(duration)` to move the fake clock.

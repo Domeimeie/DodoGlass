@@ -60,23 +60,38 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   `[{"id", "name", "year", "media_files": [{"id", "label", "default", "manifests": {"hls", "dash"}}]}]`,
   the Media files ordered by Label. A matched Movie also has `tmdb_id`, `imdb_id`, `description`
   and `image` (left out when unknown).
-  `GET /shows` → `[{"id", "name", "year"}]`, `GET /shows/{id}/seasons` → `[{"number"}]`,
-  `GET /shows/{id}/seasons/{number}/episodes` → `[{"number", "media_files": [...]}]` (Media files as
-  for Movies). Hidden applies at every level: an Episode needs a Ready Media file, a Season a listed
+  `GET /shows` → `[{"id", "name", "year"}]`, plus `tmdb_id`, `imdb_id`, `description`, `image`
+  once matched. `GET /shows/{id}/seasons` → `[{"number", "name", "description", "image"}]`,
+  `GET /shows/{id}/seasons/{number}/episodes` → `[{"number", "name", "tmdb_id", "imdb_id",
+  "description", "image", "air_date", "media_files": [...]}]` (Media files as for Movies; fields
+  TMDB did not give are left out). A Season or Episode TMDB does not name is "Season 2" /
+  "Specials" / "Episode 3". `image` falls back: a Season without a poster has its Show's, an
+  Episode without a still its Season's (so, failing that, its Show's). Hidden applies at every level: an Episode needs a Ready Media file, a Season a listed
   Episode, a Show a listed Season; a Hidden or unknown Show or Season answers 404. Processing,
   Failed and Missing Media files are not listed.
 - **Unassigned media files:** an upload outside the layout is stored without a Movie or Episode,
   goes through Processing and Ready (or Failed) like any other, and is never in the read API.
-- **TMDB for Movies** (the *matcher*): each new Movie is looked up once, searching by its folder's
-  name and year. Exactly one result with that year and the same name (ignoring case and punctuation)
+- **TMDB for Movies and Shows** (the *matcher*): each new Movie or Show is looked up once,
+  searching by its folder's name and year (`/search/movie`, `/search/tv` with the first-air year). Exactly one result with that year and the same name (ignoring case and punctuation)
   is a **Match**: name, year, imdbID, TMDB id, description and poster are filled in, except
   **Locked fields**. Otherwise **Needs review** with the top 5 results kept as candidates. While TMDB
   is unreachable or rate limiting (429, 5xx), the lookup is retried after 30 s, doubling up to 32 min
-  (about an hour in all), then Needs review; the Movie shows its folder's name and year meanwhile. A
-  pass runs every `--tmdb-interval` seconds (default 10). The port (`Tmdb` trait, reqwest client, v3
-  API key or v4 token, `--tmdb-language` default `en-US`) is shaped to take the Show, Season and
-  Episode calls next. Without `--tmdb-api-key` no lookups run.
-- **Images:** a matched Movie's poster is downloaded once, in its original size, to
+  (about an hour in all), then Needs review; the entry shows its folder's name and year meanwhile. A
+  pass runs every `--tmdb-interval` seconds (default 10): Movies, then Shows, then the Seasons and
+  Episodes of matched Shows, so a Show's Match fills them in the same pass. The port (`Tmdb` trait,
+  reqwest client, v3 API key or v4 token, `--tmdb-language` default `en-US`) has `search_movie`,
+  `movie`, `search_tv`, `tv`, `season`, `episode` and `image`; Show and Episode imdbIDs come from
+  `append_to_response=external_ids`. Without `--tmdb-api-key` no lookups run.
+- **Seasons and Episodes** of a matched Show are looked up by number (`/tv/{id}/season/{n}`,
+  `/tv/{id}/season/{n}/episode/{e}`), with no search and no Needs review. A Season gets name,
+  description and poster, an Episode name, description, still, air date, TMDB id and imdbID. One
+  TMDB does not know (404, common for specials) keeps its number as its name. While TMDB is
+  unavailable they are retried with the same backoff; when that runs out they keep their numbers.
+  One that appears later under a matched Show is looked up by the next pass, without searching the
+  Show again. A Show in Needs review leaves its Seasons and Episodes unlooked-up until it has a
+  Match.
+- **Images:** a matched Movie's, Show's or Season's poster and an Episode's still are downloaded
+  once, in its original size, to
   `assets/posters/<TMDB file name>`; `GET /images/<key>` streams it. Browsing never calls TMDB.
 - **Admin API** (under `/admin`, no authentication, localhost only):
   `GET /admin/media-files/<id>` → `{"id", "key", "label", "state", "error"}` (`key`: the upload
@@ -97,7 +112,7 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   it, its metadata and its Media files (and their output in `final`); 409 if it is not Hidden. The
   same folder uploaded again is a new entry, looked up in TMDB again.
   `GET /admin/needs-review` → `{"movies": [{"id", "name", "year", "candidates": [{"tmdb_id",
-  "name", "year", "description", "poster_path"}]}]}`.
+  "name", "year", "description", "poster_path"}]}], "shows": [...]}` (Shows in the same shape).
   `GET /admin/unassigned-media-files` → `[{"id", "path", "reason", "state"}]` by path, the reason
   taken from the path (`no_year`, `unknown_root_folder`, `wrong_depth`, `unsupported_extension`,
   `unknown_season_folder`, `no_episode_code`, `season_mismatch`).
@@ -111,10 +126,16 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   (with `folder_name`/`folder_year`, the placement identity, apart from the displayed `name`/`year`)
   and `media_file`; `show` (same folder identity), `season`, `episode`, and `media_file.episode_id`;
   `movie_metadata` (match state, retry backoff, TMDB fields, `locked_fields` as a JSON array of field
-  names; no row = not looked up yet) and `movie_candidate`.
+  names; no row = not looked up yet) and `movie_candidate`; `show_metadata` and `show_candidate`
+  (the same for Shows), `season_metadata` and `episode_metadata` (`matched`, `not_found` or
+  `retrying`, the TMDB fields, `locked_fields` in the same JSON-array shape; no row = not looked up
+  yet). Lockable fields: Movie and Show `name`, `year`, `imdb_id`, `description`, `image`; Season
+  `name`, `description`, `image`; Episode also `air_date`, `imdb_id`. A Match or lookup never writes
+  a locked field.
 
-Not built yet: TMDB for Shows, Seasons and Episodes, and the rest of the admin API (picking a
-Match, editing and locking fields, refresh, listing Hidden entries).
+Not built yet: the rest of the admin API (picking a Match, editing and locking fields, refresh,
+listing Hidden entries). Picking another Match for a Show has to clear its Seasons' and Episodes'
+metadata rows (keeping Locked fields) so the next pass refills them.
 
 **Running it:** `go-task infra:up`, `go-task transcoder:serve-s3`, `go-task asset-server:serve`
 (HTTP on `127.0.0.1:8090`), then for example
