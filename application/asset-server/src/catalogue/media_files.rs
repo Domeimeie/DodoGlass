@@ -261,6 +261,8 @@ pub(super) fn processing(
 ) -> Result<()> {
     let updated = diesel::update(media_file::table.find(id))
         .set((
+            // The latest spelling (NFC or NFD) is the one now in `ingest`.
+            media_file::source_key.eq(key),
             media_file::state.eq(PROCESSING),
             media_file::state_since_ms.eq(now),
             media_file::hls_manifest.eq(None::<String>),

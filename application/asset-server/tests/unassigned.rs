@@ -28,6 +28,16 @@ async fn an_upload_without_a_year_is_listed_as_unassigned_and_processing() {
 }
 
 #[tokio::test]
+async fn an_unassigned_upload_is_listed_with_its_path_as_uploaded() {
+    let app = TestApp::start().await;
+    let nfd = "misc/Ame\u{301}lie.mkv";
+
+    app.upload(nfd).await;
+
+    assert_eq!(unassigned(&app).await[0]["path"], nfd);
+}
+
+#[tokio::test]
 async fn each_kind_of_upload_outside_the_layout_is_kept_with_its_reason() {
     let app = TestApp::start().await;
 

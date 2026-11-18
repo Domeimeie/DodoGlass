@@ -14,14 +14,18 @@ impl Catalogue {
     /// Processing, in the Movie or Episode its path names. Seeing the same key again is
     /// a new version of the same Media file.
     pub async fn upload_seen(&self, key: &str) -> Result<()> {
-        // NFC, so that a name typed on a Mac and on Linux is the same path.
-        let key: String = key.nfc().collect();
+        // The raw key is what `ingest` holds (S3 keys are byte-exact), so it is
+        // stored for every bucket call and shown as is. Only placing reads its
+        // NFC form, so that a name typed on a Mac and on Linux is the same Movie
+        // or Show; the id is NFC-based already (ADR 0004).
+        let key = key.to_string();
+        let nfc: String = key.nfc().collect();
         let id = task_id_from_key(&key);
         let now = self.clock.now_ms();
         self.db
             .run(move |conn| {
                 conn.transaction(|conn| {
-                    let (owner, stem) = match place_upload(&key) {
+                    let (owner, stem) = match place_upload(&nfc) {
                         Placement::Movie { name, year, label } => {
                             let movie = movies::find_or_create(conn, &name, year)?;
                             (Some(Owner::Movie(movie)), label)
@@ -42,7 +46,7 @@ impl Catalogue {
                             let episode = shows::find_or_create(conn, place)?;
                             (Some(Owner::Episode(episode)), label)
                         }
-                        Placement::Unassigned(_) => (None, file_stem(&key).to_string()),
+                        Placement::Unassigned(_) => (None, file_stem(&nfc).to_string()),
                     };
                     media_files::processing(conn, &id, &key, owner, &stem, now)
                 })

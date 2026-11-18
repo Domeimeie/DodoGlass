@@ -26,7 +26,10 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   event, URL-decodes the keys, handles several records per message, and acknowledges a message only
   after it is stored.
 - **Placement of Movies:** `movies/<Name> (<Year>)/<label>.<ext>` creates the Movie (or finds it) and
-  a **Processing** Media file whose id is the shared crate's task id. Keys are normalised to NFC.
+  a **Processing** Media file whose id is the shared crate's task id. The key is read in NFC for placing and for the id
+  (so NFC and NFD spellings are the same Movie and Media file), but stored as uploaded: S3 keys are
+  byte-exact, so the 24 h check finds the input in `ingest` and the admin API shows the real path. A
+  re-upload under the other spelling stores that spelling.
 - **Placement of Episodes:** `shows/<Name> (<Year>)/Season <n>/S<nn>E<nn>…` (or `Specials/`, Season
   0) finds or creates the Show (by folder name and year), its Season (by number) and its Episode (by
   number), and a Processing Media file attached to the Episode. Every other upload is stored without

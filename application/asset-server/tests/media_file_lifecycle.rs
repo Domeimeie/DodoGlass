@@ -143,6 +143,24 @@ async fn processing_for_more_than_24_hours_with_the_input_still_in_ingest_is_fai
 }
 
 #[tokio::test]
+async fn an_nfd_upload_processing_for_more_than_24_hours_with_its_input_in_ingest_is_failed() {
+    let app = TestApp::start().await;
+    // Uploaded from a Mac: the key's bytes are NFD, and stay so in `ingest`.
+    let nfd = "movies/Ame\u{301}lie (2001)/amelie.mkv";
+    app.put(&app.buckets.ingest, nfd, b"video").await;
+    app.upload(nfd).await;
+
+    app.advance(24 * HOUR + Duration::from_secs(1));
+    app.reconcile().await;
+
+    let status = app
+        .get_json("/admin/media-files/movies_Am_lie__2001__amelie-7657ef7e")
+        .await;
+    assert_eq!(status["state"], "failed");
+    assert_eq!(status["key"], nfd);
+}
+
+#[tokio::test]
 async fn processing_for_less_than_24_hours_is_not_failed() {
     let app = TestApp::start().await;
     app.put(&app.buckets.ingest, MATRIX, b"video").await;
