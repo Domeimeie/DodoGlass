@@ -74,6 +74,29 @@ async fn an_unassigned_media_file_becomes_ready_but_is_not_in_the_read_api() {
 }
 
 #[tokio::test]
+async fn a_failed_unassigned_media_file_is_listed_as_failed() {
+    let app = TestApp::start().await;
+
+    app.upload("misc/clip.mp4").await;
+    app.fail_transcode("misc/clip.mp4", "no video stream").await;
+
+    assert_eq!(unassigned(&app).await[0]["state"], "failed");
+}
+
+#[tokio::test]
+async fn an_output_outside_the_layout_found_in_final_is_unassigned() {
+    let app = TestApp::start().await;
+
+    // The asset server never saw the upload event, only the output.
+    app.finish_transcode("misc/clip.mp4").await;
+    app.reconcile().await;
+
+    let list = unassigned(&app).await;
+    assert_eq!(list[0]["path"], "misc/clip.mp4");
+    assert_eq!(list[0]["state"], "ready");
+}
+
+#[tokio::test]
 async fn placed_media_files_are_not_unassigned() {
     let app = TestApp::start().await;
 
