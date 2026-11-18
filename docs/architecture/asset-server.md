@@ -32,18 +32,33 @@ The tracer bullet: a Movie upload becomes listable.
   startup and every `--reconcile-interval` seconds (default 300). Its manifest keys follow the
   `formats` in the marker.
 - **Read API:** `GET /movies` lists the Movies that are not Hidden, with their Ready Media files:
-  `[{"name", "year", "media_files": [{"id", "label", "manifests": {"hls", "dash"}}]}]`.
+  `[{"name", "year", "media_files": [{"id", "label", "manifests": {"hls", "dash"}}]}]`. A matched
+  Movie also has `tmdb_id`, `imdb_id`, `description` and `image` (left out when unknown).
+- **TMDB for Movies** (the *matcher*): each new Movie is looked up once, searching by its folder's
+  name and year. Exactly one result with that year and the same name (ignoring case and punctuation)
+  is a **Match**: name, year, imdbID, TMDB id, description and poster are filled in, except
+  **Locked fields**. Otherwise **Needs review** with the top 5 results kept as candidates. While TMDB
+  is unreachable or rate limiting (429, 5xx), the lookup is retried after 30 s, doubling up to 32 min
+  (about an hour in all), then Needs review; the Movie shows its folder's name and year meanwhile. A
+  pass runs every `--tmdb-interval` seconds (default 10). The port (`Tmdb` trait, reqwest client, v3
+  API key or v4 token, `--tmdb-language` default `en-US`) is shaped to take the Show, Season and
+  Episode calls next. Without `--tmdb-api-key` no lookups run.
+- **Images:** a matched Movie's poster is downloaded once, in its original size, to
+  `assets/posters/<TMDB file name>`; `GET /images/<key>` streams it. Browsing never calls TMDB.
+- **Admin API:** `GET /admin/needs-review` lists `{"movies": [{"id", "name", "year", "candidates":
+  [{"tmdb_id", "name", "year", "description", "poster_path"}]}]}`.
 - **Database:** SQLite via Diesel, migrations in portable SQL run at startup. Tables so far: `movie`
-  (with `folder_name`/`folder_year`, the placement identity, apart from the displayed `name`/`year`)
-  and `media_file`.
+  (with `folder_name`/`folder_year`, the placement identity, apart from the displayed `name`/`year`),
+  `media_file`, `movie_metadata` (match state, retry backoff, TMDB fields, `locked_fields` as a JSON
+  array of field names; no row = not looked up yet) and `movie_candidate`.
 
 Not built yet: Shows, several Media files and Labels per Movie, Failed and Missing, status hints,
-TMDB, images and the admin API.
+TMDB for Shows, and the admin actions (pick a Match, edit and lock fields, refresh, ...).
 
 **Running it:** `go-task infra:up`, `go-task transcoder:serve-s3`, `go-task asset-server:serve`
 (HTTP on `127.0.0.1:8090`), then for example
 `go-task infra:upload KEY="movies/The Matrix (1999)/matrix.mkv" -- application/transcoder/sample.mp4`
-and `curl localhost:8090/movies`. Settings: `go-task asset-server:serve -- --help`, all also as
+and `curl localhost:8090/movies` (set `ASSETS_TMDB_API_KEY` for metadata). Settings: `go-task asset-server:serve -- --help`, all also as
 `ASSETS_*` environment variables. Code layout and how to write tests:
 `application/asset-server/README.md`.
 
