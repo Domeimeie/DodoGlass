@@ -48,7 +48,9 @@ impl Reconciler {
                 }
                 Ok(None) => {}
                 // One unreadable marker must not hold up the others.
-                Err(e) => warn!(media_file = %id, error = format!("{e:#}"), "output marker unreadable"),
+                Err(e) => {
+                    warn!(media_file = %id, error = format!("{e:#}"), "output marker unreadable")
+                }
             }
         }
         Ok(())

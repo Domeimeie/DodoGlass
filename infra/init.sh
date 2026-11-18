@@ -14,7 +14,7 @@ until aws s3api list-buckets > /dev/null 2>&1; do
     sleep 1
 done
 
-for bucket in ingest final; do
+for bucket in ingest final assets; do
     if aws s3api head-bucket --bucket "$bucket" > /dev/null 2>&1; then
         echo "bucket $bucket: exists"
     else

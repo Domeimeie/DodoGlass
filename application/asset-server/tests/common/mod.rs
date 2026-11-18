@@ -144,7 +144,10 @@ impl TestApp {
 
     pub async fn put(&self, bucket: &Arc<dyn ObjectStore>, key: &str, content: &[u8]) {
         bucket
-            .put(&Path::parse(key).unwrap(), PutPayload::from(content.to_vec()))
+            .put(
+                &Path::parse(key).unwrap(),
+                PutPayload::from(content.to_vec()),
+            )
             .await
             .unwrap();
     }

@@ -1,0 +1,51 @@
+version: '3'
+
+tasks:
+  build:
+    desc: Debug build
+    cmds:
+      - cargo build
+
+  release:
+    desc: Optimized build in target/release/asset-server
+    cmds:
+      - cargo build --release
+
+  serve:
+    desc: 'Run against the local infra (first: go-task infra:up), e.g. go-task asset-server:serve -- --reconcile-interval 30'
+    env:
+      ASSETS_MQTT_URL: mqtt://localhost:1883
+      ASSETS_S3_ENDPOINT: http://localhost:9000
+      # RustFS's default development credentials (see infra/compose.yml)
+      ASSETS_S3_ACCESS_KEY: rustfsadmin
+      ASSETS_S3_SECRET_KEY: rustfsadmin
+    cmds:
+      - cargo run -- {{.CLI_ARGS}}
+
+  test:
+    desc: Run the tests
+    cmds:
+      - cargo test
+
+  lint:
+    desc: Clippy, with warnings treated as errors
+    cmds:
+      - cargo clippy --all-targets -- -D warnings
+
+  fmt:
+    desc: Format the code
+    cmds:
+      - cargo fmt
+
+  check:
+    desc: Formatting check, lint and tests
+    cmds:
+      - cargo fmt --check
+      - task: lint
+      - task: test
+
+  clean:
+    desc: Remove build artefacts and the local database
+    cmds:
+      - cargo clean
+      - rm -f assets.db assets.db-shm assets.db-wal

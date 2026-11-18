@@ -10,3 +10,6 @@ includes:
   transcoder:
     taskfile: ./application/transcoder
     dir: ./application/transcoder
+  asset-server:
+    taskfile: ./application/asset-server
+    dir: ./application/asset-server

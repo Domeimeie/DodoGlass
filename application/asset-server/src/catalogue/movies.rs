@@ -43,48 +43,57 @@ pub(super) fn find_or_create(conn: &mut SqliteConnection, name: &str, year: u16)
         .first(conn)?)
 }
 
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = movie)]
+struct MovieRow {
+    id: i32,
+    name: String,
+    year: i32,
+}
+
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = media_file)]
+struct ReadyMediaFileRow {
+    id: String,
+    label: String,
+    hls_manifest: Option<String>,
+    dash_manifest: Option<String>,
+}
+
 impl Catalogue {
     /// The Movies that are not Hidden, by name, each with its Ready Media files.
     pub async fn visible_movies(&self) -> Result<Vec<MovieView>> {
         self.db
             .run(|conn| {
-                let rows: Vec<(i32, String, i32, String, String, Option<String>, Option<String>)> =
-                    movie::table
-                        .inner_join(media_file::table)
-                        .filter(media_file::state.eq(READY))
-                        .order((
-                            movie::name.asc(),
-                            movie::year.asc(),
-                            movie::id.asc(),
-                            media_file::label.asc(),
-                        ))
-                        .select((
-                            movie::id,
-                            movie::name,
-                            movie::year,
-                            media_file::id,
-                            media_file::label,
-                            media_file::hls_manifest,
-                            media_file::dash_manifest,
-                        ))
-                        .load(conn)?;
+                let rows: Vec<(MovieRow, ReadyMediaFileRow)> = movie::table
+                    .inner_join(media_file::table)
+                    .filter(media_file::state.eq(READY))
+                    .order((
+                        movie::name.asc(),
+                        movie::year.asc(),
+                        movie::id.asc(),
+                        media_file::label.asc(),
+                    ))
+                    .select((MovieRow::as_select(), ReadyMediaFileRow::as_select()))
+                    .load(conn)?;
                 let mut movies: Vec<(i32, MovieView)> = Vec::new();
-                for (movie_id, name, year, id, label, hls, dash) in rows {
-                    if movies.last().is_none_or(|(last, _)| *last != movie_id) {
-                        movies.push((
-                            movie_id,
-                            MovieView {
-                                name,
-                                year,
-                                media_files: Vec::new(),
-                            },
-                        ));
+                for (m, file) in rows {
+                    if movies.last().is_none_or(|(last, _)| *last != m.id) {
+                        let view = MovieView {
+                            name: m.name,
+                            year: m.year,
+                            media_files: Vec::new(),
+                        };
+                        movies.push((m.id, view));
                     }
                     let (_, movie) = movies.last_mut().expect("just pushed");
                     movie.media_files.push(MediaFileView {
-                        id,
-                        label,
-                        manifests: Manifests { hls, dash },
+                        id: file.id,
+                        label: file.label,
+                        manifests: Manifests {
+                            hls: file.hls_manifest,
+                            dash: file.dash_manifest,
+                        },
                     });
                 }
                 Ok(movies.into_iter().map(|(_, m)| m).collect())
