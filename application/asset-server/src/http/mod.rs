@@ -3,6 +3,7 @@
 //! `routes()`, merged here.
 
 mod error;
+mod media_files;
 mod movies;
 
 use axum::Router;
@@ -12,5 +13,8 @@ use crate::catalogue::Catalogue;
 pub use error::ApiError;
 
 pub fn router(catalogue: Catalogue) -> Router {
-    Router::new().merge(movies::routes()).with_state(catalogue)
+    Router::new()
+        .merge(movies::routes())
+        .merge(media_files::routes())
+        .with_state(catalogue)
 }
