@@ -1,4 +1,4 @@
-//! Several Media files per Movie: Labels, the Default media file, and
+//! Several Media files per Movie or Episode: Labels, the Default media file, and
 //! re-uploads to the same path.
 
 mod common;
@@ -175,4 +175,66 @@ async fn uploading_the_same_path_again_makes_no_duplicate() {
     let movies = app.get_json("/movies").await;
     assert_eq!(movies.as_array().unwrap().len(), 1);
     assert_eq!(labels(&movies), vec![("matrix".to_string(), true)]);
+}
+
+const S01E02: &str = "shows/Breaking Bad (2008)/Season 01/S01E02.mkv";
+
+/// The Episodes of Season 1 of the only listed Show.
+async fn season_1(app: &TestApp) -> Value {
+    let show = &app.get_json("/shows").await[0]["id"];
+    app.get_json(&format!("/shows/{show}/seasons/1/episodes"))
+        .await
+}
+
+#[tokio::test]
+async fn an_episode_has_labelled_media_files_and_a_default_like_a_movie() {
+    let app = TestApp::start().await;
+
+    upload_ready(&app, S01E02).await;
+    upload_ready(&app, "shows/Breaking Bad (2008)/Season 01/S01E02.mp4").await;
+    upload_ready(
+        &app,
+        "shows/Breaking Bad (2008)/Season 01/S01E02 - extended.mkv",
+    )
+    .await;
+    // The same Label in another Episode is no collision.
+    upload_ready(&app, "shows/Breaking Bad (2008)/Season 01/S01E03.mkv").await;
+    app.reconcile().await;
+
+    let episodes = season_1(&app).await;
+    assert_eq!(
+        labels(&episodes),
+        vec![
+            ("S01E02".to_string(), true),
+            ("S01E02 (mp4)".to_string(), false),
+            ("S01E02 - extended".to_string(), false),
+        ]
+    );
+    assert_eq!(episodes[1]["media_files"][0]["label"], "S01E03");
+    assert_eq!(episodes[1]["media_files"][0]["default"], true);
+}
+
+#[tokio::test]
+async fn a_re_upload_of_an_episode_keeps_its_media_file() {
+    let app = TestApp::start().await;
+    upload_ready(&app, S01E02).await;
+    upload_ready(&app, "shows/Breaking Bad (2008)/Season 01/S01E02.mp4").await;
+    app.reconcile().await;
+    let before = season_1(&app).await;
+
+    let marker = format!(
+        "{}/source.json",
+        before[0]["media_files"][0]["id"].as_str().unwrap()
+    );
+    app.buckets.final_.delete(&marker.into()).await.unwrap();
+    app.upload(S01E02).await;
+    app.reconcile().await;
+    assert_eq!(
+        labels(&season_1(&app).await),
+        vec![("S01E02 (mp4)".to_string(), false)]
+    );
+
+    app.finish_transcode(S01E02).await;
+    app.reconcile().await;
+    assert_eq!(season_1(&app).await, before);
 }

@@ -1,3 +1,2 @@
-DROP INDEX media_file_movie_default;
-DROP INDEX media_file_movie_label;
-ALTER TABLE media_file DROP COLUMN is_default;
+DROP INDEX media_file_episode_default;
+DROP INDEX media_file_episode_label;
