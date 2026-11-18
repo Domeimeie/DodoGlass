@@ -25,6 +25,16 @@ pub struct MediaFileView {
     pub manifests: Manifests,
 }
 
+/// The id of the Movie from the folder `<name> (<year>)`, if it exists.
+pub(super) fn find(conn: &mut SqliteConnection, name: &str, year: i32) -> Result<Option<i32>> {
+    Ok(movie::table
+        .filter(movie::folder_name.eq(name))
+        .filter(movie::folder_year.eq(year))
+        .select(movie::id)
+        .first(conn)
+        .optional()?)
+}
+
 /// The id of the Movie from the folder `<name> (<year>)`, created if new.
 pub(super) fn find_or_create(conn: &mut SqliteConnection, name: &str, year: u16) -> Result<i32> {
     let year = i32::from(year);

@@ -83,3 +83,191 @@ async fn placed_media_files_are_not_unassigned() {
 
     assert_eq!(unassigned(&app).await, json!([]));
 }
+
+/// Uploads `key` and lets its transcode finish and be found.
+async fn ready(app: &TestApp, key: &str) {
+    app.upload(key).await;
+    app.finish_transcode(key).await;
+    app.reconcile().await;
+}
+
+/// The id of the only Unassigned media file.
+async fn only_unassigned_id(app: &TestApp) -> String {
+    let list = unassigned(app).await;
+    assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
+    list[0]["id"].as_str().unwrap().to_string()
+}
+
+async fn attach(app: &TestApp, id: &str, to: Value) -> (axum::http::StatusCode, Value) {
+    app.send_json("POST", &format!("{UNASSIGNED}/{id}/attach"), to)
+        .await
+}
+
+#[tokio::test]
+async fn an_attached_media_file_is_listed_in_its_movie_once_ready() {
+    let app = TestApp::start().await;
+    // The Movie exists, Hidden: its only Media file is still Processing.
+    app.upload("movies/Dune (2021)/dune.mkv").await;
+    app.upload("movies/Dune/dune-extended.mkv").await;
+    let id = only_unassigned_id(&app).await;
+
+    let (status, _) = attach(
+        &app,
+        &id,
+        json!({ "movie": { "name": "Dune", "year": 2021 } }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(unassigned(&app).await, json!([]));
+    assert_eq!(app.get_json("/movies").await, json!([]));
+
+    app.finish_transcode("movies/Dune/dune-extended.mkv").await;
+    app.reconcile().await;
+    let movies = app.get_json("/movies").await;
+    assert_eq!(movies[0]["name"], "Dune");
+    assert_eq!(movies[0]["year"], 2021);
+    assert_eq!(movies[0]["media_files"][0]["id"], id);
+    assert_eq!(movies[0]["media_files"][0]["label"], "dune-extended");
+}
+
+#[tokio::test]
+async fn an_attached_media_file_gets_a_label_free_in_its_movie() {
+    let app = TestApp::start().await;
+    ready(&app, "movies/The Matrix (1999)/matrix.mkv").await;
+    ready(&app, "movies/The Matrix/matrix.mkv").await;
+    let id = only_unassigned_id(&app).await;
+
+    let (status, body) = attach(
+        &app,
+        &id,
+        json!({ "movie": { "name": "The Matrix", "year": 1999 } }),
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(body, json!({ "id": id, "label": "matrix (mkv)" }));
+    let files = &app.get_json("/movies").await[0]["media_files"];
+    let labels: Vec<(&str, bool)> = files
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f["label"].as_str().unwrap(),
+                f["default"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(labels, [("matrix", true), ("matrix (mkv)", false)]);
+}
+
+#[tokio::test]
+async fn an_attached_media_file_does_not_take_over_the_default() {
+    let app = TestApp::start().await;
+    // alien.mkv came first, so it stays the default even while Processing.
+    app.upload("movies/Alien (1979)/alien.mkv").await;
+    ready(&app, "movies/Alien/alien-remastered.mkv").await;
+    let id = only_unassigned_id(&app).await;
+
+    attach(
+        &app,
+        &id,
+        json!({ "movie": { "name": "Alien", "year": 1979 } }),
+    )
+    .await;
+
+    let file = &app.get_json("/movies").await[0]["media_files"][0];
+    assert_eq!(file["label"], "alien-remastered");
+    assert_eq!(
+        file["default"], false,
+        "alien.mkv came first and is the default"
+    );
+}
+
+#[tokio::test]
+async fn an_unassigned_media_file_can_be_attached_to_an_episode() {
+    let app = TestApp::start().await;
+    ready(&app, "shows/Breaking Bad (2008)/Season 01/S01E01.mkv").await;
+    ready(&app, "shows/Breaking Bad (2008)/Season 01/S02E02.mkv").await;
+    let id = only_unassigned_id(&app).await;
+
+    let (status, _) = attach(
+        &app,
+        &id,
+        json!({ "episode": { "show": "Breaking Bad", "year": 2008, "season": 1, "number": 1 } }),
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    let show = app.get_json("/shows").await[0]["id"].clone();
+    let episodes = app
+        .get_json(&format!("/shows/{show}/seasons/1/episodes"))
+        .await;
+    let labels: Vec<&str> = episodes[0]["media_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, ["S01E01", "S02E02"]);
+    assert_eq!(episodes[0]["media_files"][1]["id"], id);
+}
+
+#[tokio::test]
+async fn attaching_to_a_movie_or_episode_that_does_not_exist_is_refused() {
+    let app = TestApp::start().await;
+    ready(&app, "shows/Breaking Bad (2008)/Season 01/S01E01.mkv").await;
+    app.upload("misc/clip.mp4").await;
+    let id = only_unassigned_id(&app).await;
+
+    let no_movie = json!({ "movie": { "name": "Dune", "year": 1984 } });
+    let no_episode =
+        json!({ "episode": { "show": "Breaking Bad", "year": 2008, "season": 1, "number": 9 } });
+    assert_eq!(attach(&app, &id, no_movie).await.0, 404);
+    assert_eq!(attach(&app, &id, no_episode).await.0, 404);
+
+    assert_eq!(only_unassigned_id(&app).await, id);
+}
+
+#[tokio::test]
+async fn only_unassigned_media_files_can_be_attached() {
+    let app = TestApp::start().await;
+    ready(&app, "movies/The Matrix (1999)/matrix.mkv").await;
+    ready(&app, "movies/Dune (2021)/dune.mkv").await;
+    let matrix = app.get_json("/movies").await[1]["media_files"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let dune = json!({ "movie": { "name": "Dune", "year": 2021 } });
+
+    assert_eq!(attach(&app, &matrix, dune.clone()).await.0, 404);
+    assert_eq!(attach(&app, "no-such-id", dune).await.0, 404);
+    assert_eq!(
+        app.get_json("/movies").await[0]["media_files"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn an_attached_media_file_stays_attached_when_uploaded_again() {
+    let app = TestApp::start().await;
+    ready(&app, "movies/Dune (2021)/dune.mkv").await;
+    ready(&app, "movies/Dune/dune-extended.mkv").await;
+    let id = only_unassigned_id(&app).await;
+    attach(
+        &app,
+        &id,
+        json!({ "movie": { "name": "Dune", "year": 2021 } }),
+    )
+    .await;
+
+    ready(&app, "movies/Dune/dune-extended.mkv").await;
+
+    assert_eq!(unassigned(&app).await, json!([]));
+    let files = &app.get_json("/movies").await[0]["media_files"];
+    assert_eq!(files[1]["id"], id);
+    assert_eq!(files[1]["label"], "dune-extended");
+}

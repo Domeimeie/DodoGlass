@@ -81,6 +81,24 @@ pub(super) fn find_or_create(conn: &mut SqliteConnection, place: EpisodePlace) -
         .first(conn)?)
 }
 
+/// The id of the Episode at `place`, if it exists (the Show by its folder
+/// name and year).
+pub(super) fn find(conn: &mut SqliteConnection, place: EpisodePlace) -> Result<Option<i32>> {
+    let (Ok(season), Ok(number)) = (i32::try_from(place.season), i32::try_from(place.episode))
+    else {
+        return Ok(None);
+    };
+    Ok(episode::table
+        .inner_join(season::table.inner_join(show::table))
+        .filter(show::folder_name.eq(place.show))
+        .filter(show::folder_year.eq(i32::from(place.year)))
+        .filter(season::number.eq(season))
+        .filter(episode::number.eq(number))
+        .select(episode::id)
+        .first(conn)
+        .optional()?)
+}
+
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = media_file)]
 struct ReadyMediaFileRow {

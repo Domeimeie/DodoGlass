@@ -24,7 +24,7 @@ use crate::ports::clock::Clock;
 pub use media_files::Manifests;
 pub use movies::{MediaFileView, MovieView};
 pub use shows::{EpisodeView, SeasonView, ShowView};
-pub use unassigned::UnassignedView;
+pub use unassigned::{AttachTo, Attached, UnassignedView};
 
 #[derive(Clone)]
 pub struct Catalogue {

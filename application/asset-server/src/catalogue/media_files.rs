@@ -84,6 +84,43 @@ pub(super) fn processing(
     Ok(())
 }
 
+/// The Unassigned media file `id` now belongs to `owner`. Its Label (the file
+/// name's stem) is made unique within the owner as for an upload, and it is
+/// the owner's Default media file only if the owner had none. Returns its new
+/// Label, or `None` if `id` is not an Unassigned media file. Run it inside a
+/// transaction.
+pub(super) fn attach(
+    conn: &mut SqliteConnection,
+    id: &str,
+    owner: Owner,
+) -> Result<Option<String>> {
+    let found: Option<(String, String)> = media_file::table
+        .find(id)
+        .filter(media_file::movie_id.is_null())
+        .filter(media_file::episode_id.is_null())
+        .select((media_file::source_key, media_file::label))
+        .first(conn)
+        .optional()?;
+    let Some((key, stem)) = found else {
+        return Ok(None);
+    };
+    let taken = labels_of(conn, owner)?;
+    let label = unique_label(&stem, extension(&key), &taken);
+    let (movie, episode) = match owner {
+        Owner::Movie(movie) => (Some(movie), None),
+        Owner::Episode(episode) => (None, Some(episode)),
+    };
+    diesel::update(media_file::table.find(id))
+        .set((
+            media_file::movie_id.eq(movie),
+            media_file::episode_id.eq(episode),
+            media_file::label.eq(&label),
+            media_file::is_default.eq(taken.is_empty()),
+        ))
+        .execute(conn)?;
+    Ok(Some(label))
+}
+
 /// The Labels of every Media file of `owner`, whatever its state.
 fn labels_of(conn: &mut SqliteConnection, owner: Owner) -> Result<Vec<String>> {
     let query = media_file::table.select(media_file::label);
