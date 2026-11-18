@@ -34,6 +34,14 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    /// Something the request needs (TMDB) is unavailable: try again (503).
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: message.into(),
+        }
+    }
 }
 
 /// Anything unexpected (database, storage) is a 500.

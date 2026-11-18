@@ -10,8 +10,9 @@ use axum::routing::delete;
 use super::media_files::answer;
 use crate::catalogue::{Catalogue, Entry};
 use crate::http::ApiError;
+use crate::http::ApiState;
 
-pub fn routes() -> Router<Catalogue> {
+pub fn routes() -> Router<ApiState> {
     Router::new()
         .route("/movies/{movie}", delete(delete_movie))
         .route("/shows/{show}", delete(delete_show))

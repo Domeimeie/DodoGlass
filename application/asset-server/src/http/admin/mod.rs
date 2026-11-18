@@ -4,6 +4,7 @@
 //! Each part of the admin API is its own module with its own `routes()`
 //! (paths relative to `/admin`), merged here.
 
+mod corrections;
 mod hidden;
 mod media_files;
 mod review;
@@ -11,10 +12,11 @@ mod unassigned;
 
 use axum::Router;
 
-use crate::catalogue::Catalogue;
+use crate::http::ApiState;
 
-pub fn routes() -> Router<Catalogue> {
+pub fn routes() -> Router<ApiState> {
     Router::new()
+        .merge(corrections::routes())
         .merge(hidden::routes())
         .merge(media_files::routes())
         .merge(review::routes())

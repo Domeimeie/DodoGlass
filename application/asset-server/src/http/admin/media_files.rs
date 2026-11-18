@@ -10,8 +10,9 @@ use serde::Deserialize;
 
 use crate::catalogue::{Catalogue, Change, MediaFileState, MediaFileStatus};
 use crate::http::ApiError;
+use crate::http::ApiState;
 
-pub fn routes() -> Router<Catalogue> {
+pub fn routes() -> Router<ApiState> {
     Router::new()
         .route("/media-files", get(list))
         .route("/media-files/{id}", get(show).patch(edit).delete(remove))

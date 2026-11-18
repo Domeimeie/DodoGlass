@@ -76,7 +76,11 @@ impl App {
     }
 
     pub fn router(&self) -> Router {
-        http::router(self.catalogue.clone()).merge(http::images::router(self.assets.clone()))
+        let state = http::ApiState {
+            catalogue: self.catalogue.clone(),
+            matcher: self.matcher.clone(),
+        };
+        http::router(state).merge(http::images::router(self.assets.clone()))
     }
 
     /// One pass of TMDB lookups: new Movies, and retries that are due.

@@ -6,9 +6,9 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 
 use crate::catalogue::{AttachTo, Attached, Catalogue, UnassignedView};
-use crate::http::ApiError;
+use crate::http::{ApiError, ApiState};
 
-pub fn routes() -> Router<Catalogue> {
+pub fn routes() -> Router<ApiState> {
     Router::new()
         .route("/unassigned-media-files", get(list))
         .route("/unassigned-media-files/{id}/attach", post(attach))

@@ -27,6 +27,10 @@ use anyhow::Result;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use tracing::{info, warn};
+
+mod admin;
+
+pub use admin::Corrected;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::catalogue::{
@@ -84,7 +88,7 @@ fn pick_exact(results: Vec<Candidate>, name: &str, year: i32) -> Result<Candidat
 }
 
 /// Why a lookup did not come to an [`Outcome`].
-enum LookupError {
+pub enum LookupError {
     /// Worth trying again later (TMDB or the `assets` bucket unavailable).
     Retry(String),
     /// Trying again won't help: an admin has to look.
@@ -160,23 +164,35 @@ impl Matcher {
     async fn find(&self, lookup: &PendingLookup) -> Result<Outcome<MovieMatch>, LookupError> {
         let results = self.tmdb.search_movie(&lookup.name, lookup.year).await?;
         let results = results.into_iter().map(movie_candidate).collect();
-        let only = match pick_exact(results, &lookup.name, lookup.year) {
-            Ok(only) => only,
-            Err(candidates) => return Ok(Outcome::NeedsReview(candidates)),
-        };
-        let details = self.tmdb.movie(only.tmdb_id).await?;
-        let image_key = match &details.poster_path {
-            Some(path) => self.download(path).await?,
-            None => None,
-        };
-        Ok(Outcome::Matched(MovieMatch {
+        match pick_exact(results, &lookup.name, lookup.year) {
+            Ok(only) => Ok(Outcome::Matched(
+                self.fetch_movie(only.tmdb_id, Some(lookup.year)).await?,
+            )),
+            Err(candidates) => Ok(Outcome::NeedsReview(candidates)),
+        }
+    }
+
+    /// The details and poster of TMDB Movie `tmdb_id`. `fallback_year` stands
+    /// in when TMDB has no release date; without either, it is refused.
+    async fn fetch_movie(
+        &self,
+        tmdb_id: i64,
+        fallback_year: Option<i32>,
+    ) -> Result<MovieMatch, LookupError> {
+        let details = self.tmdb.movie(tmdb_id).await?;
+        let year = details
+            .year
+            .or(fallback_year)
+            .ok_or_else(|| LookupError::Review(format!("TMDB has no year for movie {tmdb_id}")))?;
+        let image_key = self.download_opt(details.poster_path.as_deref()).await?;
+        Ok(MovieMatch {
             tmdb_id: details.tmdb_id,
             name: details.title,
-            year: details.year.unwrap_or(lookup.year),
+            year,
             imdb_id: details.imdb_id,
             description: details.overview,
             image_key,
-        }))
+        })
     }
 
     async fn look_up_show(&self, lookup: PendingShowLookup) -> Result<()> {
@@ -218,20 +234,34 @@ impl Matcher {
     ) -> Result<Outcome<ShowMatch>, LookupError> {
         let results = self.tmdb.search_tv(&lookup.name, lookup.year).await?;
         let results = results.into_iter().map(show_candidate).collect();
-        let only = match pick_exact(results, &lookup.name, lookup.year) {
-            Ok(only) => only,
-            Err(candidates) => return Ok(Outcome::NeedsReview(candidates)),
-        };
-        let details = self.tmdb.tv(only.tmdb_id).await?;
+        match pick_exact(results, &lookup.name, lookup.year) {
+            Ok(only) => Ok(Outcome::Matched(
+                self.fetch_show(only.tmdb_id, Some(lookup.year)).await?,
+            )),
+            Err(candidates) => Ok(Outcome::NeedsReview(candidates)),
+        }
+    }
+
+    /// The details and poster of TMDB Show `tmdb_id`, as [`Self::fetch_movie`].
+    async fn fetch_show(
+        &self,
+        tmdb_id: i64,
+        fallback_year: Option<i32>,
+    ) -> Result<ShowMatch, LookupError> {
+        let details = self.tmdb.tv(tmdb_id).await?;
+        let year = details
+            .year
+            .or(fallback_year)
+            .ok_or_else(|| LookupError::Review(format!("TMDB has no year for show {tmdb_id}")))?;
         let image_key = self.download_opt(details.poster_path.as_deref()).await?;
-        Ok(Outcome::Matched(ShowMatch {
+        Ok(ShowMatch {
             tmdb_id: details.tmdb_id,
             name: details.name,
-            year: details.year.unwrap_or(lookup.year),
+            year,
             imdb_id: details.imdb_id,
             description: details.overview,
             image_key,
-        }))
+        })
     }
 
     /// Looks a Season or Episode of a matched Show up by number. TMDB not

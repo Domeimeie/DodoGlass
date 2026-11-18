@@ -12,10 +12,14 @@
 //!   and Locked fields of Movies;
 //! - [`show_metadata`]: the same for Shows, and their Seasons and Episodes
 //!   looked up by number;
+//! - [`corrections`]: the admin's metadata corrections: fields edited by
+//!   hand (Locked fields), and the entries a picked Match or a refresh
+//!   applies to;
 //! - [`admin`]: what an admin changes: the Default media file, Labels,
 //!   removing Media files and deleting Hidden entries.
 
 mod admin;
+mod corrections;
 mod media_files;
 mod metadata;
 mod movies;
@@ -33,6 +37,7 @@ use crate::db::Db;
 use crate::ports::clock::Clock;
 
 pub use admin::{Change, Entry};
+pub use corrections::MovieLookup;
 pub use media_files::{
     Manifests, MediaFileState, MediaFileStatus, PROCESSING_TIMEOUT_MS, TIMED_OUT, TrackedMediaFile,
 };

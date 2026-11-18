@@ -5,9 +5,10 @@ use axum::routing::get;
 use axum::{Json, Router};
 
 use super::ApiError;
+use super::ApiState;
 use crate::catalogue::{Catalogue, MovieView};
 
-pub fn routes() -> Router<Catalogue> {
+pub fn routes() -> Router<ApiState> {
     Router::new().route("/movies", get(list))
 }
 
