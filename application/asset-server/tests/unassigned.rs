@@ -4,6 +4,7 @@
 mod common;
 
 use common::TestApp;
+use common::tmdb::{episode, movie, season, show};
 use serde_json::{Value, json};
 
 const UNASSIGNED: &str = "/admin/unassigned-media-files";
@@ -293,4 +294,84 @@ async fn an_attached_media_file_stays_attached_when_uploaded_again() {
     let files = &app.get_json("/movies").await[0]["media_files"];
     assert_eq!(files[1]["id"], id);
     assert_eq!(files[1]["label"], "dune-extended");
+}
+
+#[tokio::test]
+async fn an_unassigned_media_file_can_be_attached_to_a_new_movie_from_a_tmdb_id() {
+    let app = TestApp::start().await;
+    app.tmdb.add_movie(movie(603, "The Matrix", 1999));
+    ready(&app, "misc/matrix.mkv").await;
+    let id = only_unassigned_id(&app).await;
+
+    let (status, body) = attach(&app, &id, json!({ "new_movie": { "tmdb_id": 603 } })).await;
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["label"], "matrix");
+    assert_eq!(unassigned(&app).await, json!([]));
+    let movies = app.get_json("/movies").await;
+    assert_eq!(movies[0]["name"], "The Matrix");
+    assert_eq!(movies[0]["year"], 1999);
+    assert_eq!(movies[0]["tmdb_id"], 603);
+    assert_eq!(movies[0]["description"], "About The Matrix.");
+    assert_eq!(movies[0]["media_files"][0]["id"], id);
+    // Its folder is the Movie's name and year: later uploads there join it.
+    ready(&app, "movies/The Matrix (1999)/matrix-4k.mkv").await;
+    let movies = app.get_json("/movies").await;
+    assert_eq!(movies.as_array().unwrap().len(), 1, "{movies}");
+    assert_eq!(movies[0]["media_files"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn an_unassigned_media_file_can_be_attached_to_an_episode_of_a_new_show_from_a_tmdb_id() {
+    let app = TestApp::start().await;
+    app.tmdb.add_show(show(1396, "Breaking Bad", 2008));
+    app.tmdb.add_season(1396, 1, season("Season 1"));
+    app.tmdb.add_episode(
+        1396,
+        1,
+        2,
+        episode(62086, "Cat's in the Bag...", "2008-01-27"),
+    );
+    ready(&app, "misc/bb-102.mkv").await;
+    let id = only_unassigned_id(&app).await;
+
+    let to = json!({ "new_episode": { "tmdb_id": 1396, "season": 1, "number": 2 } });
+    let (status, body) = attach(&app, &id, to).await;
+
+    assert_eq!(status, 200, "{body}");
+    let shows = app.get_json("/shows").await;
+    assert_eq!(shows[0]["name"], "Breaking Bad");
+    assert_eq!(shows[0]["tmdb_id"], 1396);
+    let show = &shows[0]["id"];
+    let seasons = app.get_json(&format!("/shows/{show}/seasons")).await;
+    assert_eq!(seasons[0]["name"], "Season 1");
+    let episodes = app
+        .get_json(&format!("/shows/{show}/seasons/1/episodes"))
+        .await;
+    assert_eq!(episodes[0]["number"], 2);
+    assert_eq!(episodes[0]["name"], "Cat's in the Bag...");
+    assert_eq!(episodes[0]["media_files"][0]["id"], id);
+}
+
+#[tokio::test]
+async fn attaching_to_a_new_entry_tmdb_does_not_know_is_refused() {
+    let app = TestApp::start().await;
+    ready(&app, "misc/matrix.mkv").await;
+    let id = only_unassigned_id(&app).await;
+
+    let (status, _) = attach(&app, &id, json!({ "new_movie": { "tmdb_id": 603 } })).await;
+    assert_eq!(status, 400);
+    let (status, _) = attach(
+        &app,
+        "no-such-id",
+        json!({ "new_movie": { "tmdb_id": 603 } }),
+    )
+    .await;
+    assert_eq!(status, 404);
+    app.tmdb.add_movie(movie(603, "The Matrix", 1999));
+    app.tmdb.set_unreachable(true);
+    let (status, _) = attach(&app, &id, json!({ "new_movie": { "tmdb_id": 603 } })).await;
+    assert_eq!(status, 503);
+    assert_eq!(only_unassigned_id(&app).await, id);
+    assert_eq!(app.get_json("/movies").await, json!([]));
 }

@@ -4,9 +4,26 @@
 //! every lookup.
 
 use anyhow::Result;
+use serde::Deserialize;
 
 use super::{LookupError, Matcher};
-use crate::catalogue::{Entry, PartRefresh};
+use crate::catalogue::{Attached, Entry, PartRefresh};
+
+/// A new Movie or Episode an admin attaches an Unassigned media file to,
+/// created from a TMDB id.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachNew {
+    NewMovie {
+        tmdb_id: i64,
+    },
+    /// Episode `number` of Season `season` of the TMDB Show `tmdb_id`.
+    NewEpisode {
+        tmdb_id: i64,
+        season: u32,
+        number: u32,
+    },
+}
 
 /// What came of an admin's lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +106,43 @@ impl Matcher {
                 self.look_up_show(show.lookup).await?;
                 self.look_up_parts_of(show_id).await?;
                 Ok(Corrected::Done)
+            }
+        }
+    }
+
+    /// Attaches the Unassigned media file `id` to a new Movie, or an Episode
+    /// of a new Show, created from TMDB (with that as its Match). The Show's
+    /// Seasons and Episodes are looked up by number at once. `Err` when TMDB
+    /// refuses or is unavailable: nothing is created or attached then.
+    pub async fn attach_new(&self, id: &str, to: AttachNew) -> Result<Result<Attached, Corrected>> {
+        if !self.catalogue.is_unassigned_media_file(id).await? {
+            return Ok(Ok(Attached::NoSuchMediaFile));
+        }
+        match to {
+            AttachNew::NewMovie { tmdb_id } => {
+                let found = match self.fetch_movie(tmdb_id, None).await {
+                    Ok(found) => found,
+                    Err(e) => return Ok(Err(e.into())),
+                };
+                Ok(Ok(self.catalogue.attach_to_new_movie(id, found).await?))
+            }
+            AttachNew::NewEpisode {
+                tmdb_id,
+                season,
+                number,
+            } => {
+                let found = match self.fetch_show(tmdb_id, None).await {
+                    Ok(found) => found,
+                    Err(e) => return Ok(Err(e.into())),
+                };
+                let (attached, show_id) = self
+                    .catalogue
+                    .attach_to_new_episode(id, found, season, number)
+                    .await?;
+                if let Some(show_id) = show_id {
+                    self.look_up_parts_of(show_id).await?;
+                }
+                Ok(Ok(attached))
             }
         }
     }

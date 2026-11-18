@@ -41,14 +41,23 @@ pub fn routes() -> Router<ApiState> {
         )
 }
 
-/// A [`Corrected`] as an answer: 204, 404, 409, 400 or 503.
+/// A [`Corrected`] as an answer: 204, or as [`failure`].
 fn answer(corrected: Corrected) -> Result<StatusCode, ApiError> {
     match corrected {
         Corrected::Done => Ok(StatusCode::NO_CONTENT),
-        Corrected::NotFound(message) => Err(ApiError::not_found(message)),
-        Corrected::Refused(message) => Err(ApiError::conflict(message)),
-        Corrected::Rejected(message) => Err(ApiError::bad_request(message)),
-        Corrected::Unavailable(message) => Err(ApiError::unavailable(message)),
+        other => Err(failure(other)),
+    }
+}
+
+/// A [`Corrected`] that is not done as an error: 404, 409, 400 (TMDB
+/// refused) or 503 (TMDB unavailable).
+pub(super) fn failure(corrected: Corrected) -> ApiError {
+    match corrected {
+        Corrected::Done => anyhow::anyhow!("a correction that was done is no failure").into(),
+        Corrected::NotFound(message) => ApiError::not_found(message),
+        Corrected::Refused(message) => ApiError::conflict(message),
+        Corrected::Rejected(message) => ApiError::bad_request(message),
+        Corrected::Unavailable(message) => ApiError::unavailable(message),
     }
 }
 

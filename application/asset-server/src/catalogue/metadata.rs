@@ -156,6 +156,59 @@ fn locked_fields(conn: &mut SqliteConnection, movie_id: i32) -> Result<LockedFie
     Ok(json.map(|j| LockedFields::parse(&j)).unwrap_or_default())
 }
 
+/// [`Catalogue::movie_matched`], inside a transaction of the caller's.
+pub(super) fn apply_movie_match(
+    conn: &mut SqliteConnection,
+    movie_id: i32,
+    found: MovieMatch,
+) -> Result<()> {
+    let locks = locked_fields(conn, movie_id)?;
+    let current: Option<MetadataRow> = movie_metadata::table
+        .find(movie_id)
+        .select(MetadataRow::as_select())
+        .first(conn)
+        .optional()?;
+    let keep = |field: &str, new: Option<String>, old: Option<String>| {
+        if locks.contains(field) { old } else { new }
+    };
+    let (imdb_id, description, image_key) = match current {
+        Some(c) => (
+            keep("imdb_id", found.imdb_id, c.imdb_id),
+            keep("description", found.description, c.description),
+            keep("image", found.image_key, c.image_key),
+        ),
+        None => (found.imdb_id, found.description, found.image_key),
+    };
+    if !locks.contains("name") {
+        diesel::update(movie::table.find(movie_id))
+            .set(movie::name.eq(&found.name))
+            .execute(conn)?;
+    }
+    if !locks.contains("year") {
+        diesel::update(movie::table.find(movie_id))
+            .set(movie::year.eq(found.year))
+            .execute(conn)?;
+    }
+    let values = (
+        movie_metadata::match_state.eq(MATCHED),
+        movie_metadata::lookup_attempts.eq(0),
+        movie_metadata::retry_at_ms.eq(None::<i64>),
+        movie_metadata::tmdb_id.eq(Some(found.tmdb_id)),
+        movie_metadata::imdb_id.eq(imdb_id),
+        movie_metadata::description.eq(description),
+        movie_metadata::image_key.eq(image_key),
+    );
+    diesel::insert_into(movie_metadata::table)
+        .values((movie_metadata::movie_id.eq(movie_id), values.clone()))
+        .on_conflict(movie_metadata::movie_id)
+        .do_update()
+        .set(values)
+        .execute(conn)?;
+    diesel::delete(movie_candidate::table.filter(movie_candidate::movie_id.eq(movie_id)))
+        .execute(conn)?;
+    Ok(())
+}
+
 impl Catalogue {
     /// The Movies to look up now: new ones, and those whose retry is due.
     pub async fn pending_lookups(&self) -> Result<Vec<PendingLookup>> {
@@ -195,57 +248,7 @@ impl Catalogue {
     /// The Movie has a Match: every field that is not locked is filled in.
     pub async fn movie_matched(&self, movie_id: i32, found: MovieMatch) -> Result<()> {
         self.db
-            .run(move |conn| {
-                conn.transaction(|conn| {
-                    let locks = locked_fields(conn, movie_id)?;
-                    let current: Option<MetadataRow> = movie_metadata::table
-                        .find(movie_id)
-                        .select(MetadataRow::as_select())
-                        .first(conn)
-                        .optional()?;
-                    let keep = |field: &str, new: Option<String>, old: Option<String>| {
-                        if locks.contains(field) { old } else { new }
-                    };
-                    let (imdb_id, description, image_key) = match current {
-                        Some(c) => (
-                            keep("imdb_id", found.imdb_id, c.imdb_id),
-                            keep("description", found.description, c.description),
-                            keep("image", found.image_key, c.image_key),
-                        ),
-                        None => (found.imdb_id, found.description, found.image_key),
-                    };
-                    if !locks.contains("name") {
-                        diesel::update(movie::table.find(movie_id))
-                            .set(movie::name.eq(&found.name))
-                            .execute(conn)?;
-                    }
-                    if !locks.contains("year") {
-                        diesel::update(movie::table.find(movie_id))
-                            .set(movie::year.eq(found.year))
-                            .execute(conn)?;
-                    }
-                    let values = (
-                        movie_metadata::match_state.eq(MATCHED),
-                        movie_metadata::lookup_attempts.eq(0),
-                        movie_metadata::retry_at_ms.eq(None::<i64>),
-                        movie_metadata::tmdb_id.eq(Some(found.tmdb_id)),
-                        movie_metadata::imdb_id.eq(imdb_id),
-                        movie_metadata::description.eq(description),
-                        movie_metadata::image_key.eq(image_key),
-                    );
-                    diesel::insert_into(movie_metadata::table)
-                        .values((movie_metadata::movie_id.eq(movie_id), values.clone()))
-                        .on_conflict(movie_metadata::movie_id)
-                        .do_update()
-                        .set(values)
-                        .execute(conn)?;
-                    diesel::delete(
-                        movie_candidate::table.filter(movie_candidate::movie_id.eq(movie_id)),
-                    )
-                    .execute(conn)?;
-                    Ok(())
-                })
-            })
+            .run(move |conn| conn.transaction(|conn| apply_movie_match(conn, movie_id, found)))
             .await
     }
 

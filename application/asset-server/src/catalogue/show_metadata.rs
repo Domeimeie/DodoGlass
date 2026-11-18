@@ -275,6 +275,62 @@ fn unless_locked<T>(locks: &LockedFields, field: &str, new: T, old: T) -> T {
     if locks.contains(field) { old } else { new }
 }
 
+/// [`Catalogue::show_matched`], inside a transaction of the caller's.
+pub(super) fn apply_show_match(
+    conn: &mut SqliteConnection,
+    show_id: i32,
+    found: ShowMatch,
+) -> Result<()> {
+    let current: Option<(String, ShowMetadataRow)> = show_metadata::table
+        .find(show_id)
+        .select((show_metadata::locked_fields, ShowMetadataRow::as_select()))
+        .first(conn)
+        .optional()?;
+    let (locks, current) = match current {
+        Some((locks, c)) => (LockedFields::parse(&locks), Some(c)),
+        None => (LockedFields::default(), None),
+    };
+    let same_match = current
+        .as_ref()
+        .is_some_and(|c| c.tmdb_id == Some(found.tmdb_id));
+    let (imdb_id, description, image_key) = match current {
+        Some(c) => (
+            unless_locked(&locks, "imdb_id", found.imdb_id, c.imdb_id),
+            unless_locked(&locks, "description", found.description, c.description),
+            unless_locked(&locks, "image", found.image_key, c.image_key),
+        ),
+        None => (found.imdb_id, found.description, found.image_key),
+    };
+    if !locks.contains("name") {
+        diesel::update(show::table.find(show_id))
+            .set(show::name.eq(&found.name))
+            .execute(conn)?;
+    }
+    if !locks.contains("year") {
+        diesel::update(show::table.find(show_id))
+            .set(show::year.eq(found.year))
+            .execute(conn)?;
+    }
+    let values = (
+        show_metadata::match_state.eq(MATCHED),
+        show_metadata::lookup_attempts.eq(0),
+        show_metadata::retry_at_ms.eq(None::<i64>),
+        show_metadata::tmdb_id.eq(Some(found.tmdb_id)),
+        show_metadata::imdb_id.eq(imdb_id),
+        show_metadata::description.eq(description),
+        show_metadata::image_key.eq(image_key),
+    );
+    diesel::insert_into(show_metadata::table)
+        .values((show_metadata::show_id.eq(show_id), values.clone()))
+        .on_conflict(show_metadata::show_id)
+        .do_update()
+        .set(values)
+        .execute(conn)?;
+    diesel::delete(show_candidate::table.filter(show_candidate::show_id.eq(show_id)))
+        .execute(conn)?;
+    look_up_parts_again(conn, show_id, !same_match)
+}
+
 impl Catalogue {
     /// The Shows to look up now: new ones, and those whose retry is due.
     pub async fn pending_show_lookups(&self) -> Result<Vec<PendingShowLookup>> {
@@ -318,60 +374,7 @@ impl Catalogue {
     /// are kept), so nothing of it stays should TMDB not answer.
     pub async fn show_matched(&self, show_id: i32, found: ShowMatch) -> Result<()> {
         self.db
-            .run(move |conn| {
-                conn.transaction(|conn| {
-                    let current: Option<(String, ShowMetadataRow)> = show_metadata::table
-                        .find(show_id)
-                        .select((show_metadata::locked_fields, ShowMetadataRow::as_select()))
-                        .first(conn)
-                        .optional()?;
-                    let (locks, current) = match current {
-                        Some((locks, c)) => (LockedFields::parse(&locks), Some(c)),
-                        None => (LockedFields::default(), None),
-                    };
-                    let same_match = current
-                        .as_ref()
-                        .is_some_and(|c| c.tmdb_id == Some(found.tmdb_id));
-                    let (imdb_id, description, image_key) = match current {
-                        Some(c) => (
-                            unless_locked(&locks, "imdb_id", found.imdb_id, c.imdb_id),
-                            unless_locked(&locks, "description", found.description, c.description),
-                            unless_locked(&locks, "image", found.image_key, c.image_key),
-                        ),
-                        None => (found.imdb_id, found.description, found.image_key),
-                    };
-                    if !locks.contains("name") {
-                        diesel::update(show::table.find(show_id))
-                            .set(show::name.eq(&found.name))
-                            .execute(conn)?;
-                    }
-                    if !locks.contains("year") {
-                        diesel::update(show::table.find(show_id))
-                            .set(show::year.eq(found.year))
-                            .execute(conn)?;
-                    }
-                    let values = (
-                        show_metadata::match_state.eq(MATCHED),
-                        show_metadata::lookup_attempts.eq(0),
-                        show_metadata::retry_at_ms.eq(None::<i64>),
-                        show_metadata::tmdb_id.eq(Some(found.tmdb_id)),
-                        show_metadata::imdb_id.eq(imdb_id),
-                        show_metadata::description.eq(description),
-                        show_metadata::image_key.eq(image_key),
-                    );
-                    diesel::insert_into(show_metadata::table)
-                        .values((show_metadata::show_id.eq(show_id), values.clone()))
-                        .on_conflict(show_metadata::show_id)
-                        .do_update()
-                        .set(values)
-                        .execute(conn)?;
-                    diesel::delete(
-                        show_candidate::table.filter(show_candidate::show_id.eq(show_id)),
-                    )
-                    .execute(conn)?;
-                    look_up_parts_again(conn, show_id, !same_match)
-                })
-            })
+            .run(move |conn| conn.transaction(|conn| apply_show_match(conn, show_id, found)))
             .await
     }
 

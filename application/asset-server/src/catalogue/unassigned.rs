@@ -8,8 +8,12 @@ use dodoglass_ids::{Placement, UnassignedReason, place_upload};
 use serde::{Deserialize, Serialize};
 
 use super::media_files::Owner;
-use super::schema::media_file;
+use super::metadata::{MovieMatch, apply_movie_match};
+use super::schema::{media_file, movie_metadata, show, show_metadata};
+use super::show_metadata::{ShowMatch, apply_show_match};
 use super::{Catalogue, media_files, movies, shows};
+
+const MATCHED: &str = "matched";
 
 /// An Unassigned media file, as the admin API lists it.
 #[derive(Debug, Clone, Serialize)]
@@ -50,6 +54,18 @@ fn is_unassigned(conn: &mut SqliteConnection, id: &str) -> Result<bool> {
         .count()
         .get_result(conn)?;
     Ok(count > 0)
+}
+
+/// A year from TMDB as a folder year.
+fn folder_year(year: i32) -> Result<u16> {
+    u16::try_from(year).map_err(|_| anyhow::anyhow!("{year} is not a year"))
+}
+
+fn attached(label: Option<String>) -> Result<Attached> {
+    Ok(match label {
+        Some(label) => Attached::Attached { label },
+        None => Attached::NoSuchMediaFile,
+    })
 }
 
 /// Where an admin attaches an Unassigned media file: an existing Movie or
@@ -119,6 +135,91 @@ impl Catalogue {
                         Some(label) => Attached::Attached { label },
                         None => Attached::NoSuchMediaFile,
                     })
+                })
+            })
+            .await
+    }
+
+    /// Whether `id` is an Unassigned media file.
+    pub async fn is_unassigned_media_file(&self, id: &str) -> Result<bool> {
+        let id = id.to_string();
+        self.db.run(move |conn| is_unassigned(conn, &id)).await
+    }
+
+    /// Attaches the Unassigned media file `id` to the Movie TMDB knows as
+    /// `found`, created with `found`'s name and year as its folder (so later
+    /// uploads to `movies/<name> (<year>)/` join it) and `found` as its Match.
+    /// A Movie with that folder that exists already is used, and gets the
+    /// Match unless it has one.
+    pub async fn attach_to_new_movie(&self, id: &str, found: MovieMatch) -> Result<Attached> {
+        let id = id.to_string();
+        self.db
+            .run(move |conn| {
+                conn.transaction(|conn| {
+                    if !is_unassigned(conn, &id)? {
+                        return Ok(Attached::NoSuchMediaFile);
+                    }
+                    let movie_id =
+                        movies::find_or_create(conn, &found.name, folder_year(found.year)?)?;
+                    let state: Option<String> = movie_metadata::table
+                        .find(movie_id)
+                        .select(movie_metadata::match_state)
+                        .first(conn)
+                        .optional()?;
+                    if state.as_deref() != Some(MATCHED) {
+                        apply_movie_match(conn, movie_id, found)?;
+                    }
+                    attached(media_files::attach(conn, &id, Owner::Movie(movie_id))?)
+                })
+            })
+            .await
+    }
+
+    /// Attaches the Unassigned media file `id` to Episode `number` of Season
+    /// `season` of the Show TMDB knows as `found`, created as for
+    /// [`Self::attach_to_new_movie`] (with the Season and Episode if new).
+    /// Answers the Show's id too, whose Seasons and Episodes are then due for
+    /// a lookup by number.
+    pub async fn attach_to_new_episode(
+        &self,
+        id: &str,
+        found: ShowMatch,
+        season: u32,
+        number: u32,
+    ) -> Result<(Attached, Option<i32>)> {
+        let id = id.to_string();
+        self.db
+            .run(move |conn| {
+                conn.transaction(|conn| {
+                    if !is_unassigned(conn, &id)? {
+                        return Ok((Attached::NoSuchMediaFile, None));
+                    }
+                    let year = folder_year(found.year)?;
+                    let place = shows::EpisodePlace {
+                        show: &found.name,
+                        year,
+                        season,
+                        episode: number,
+                    };
+                    let episode_id = shows::find_or_create(conn, place)?;
+                    let show_id: i32 = show::table
+                        .filter(show::folder_name.eq(&found.name))
+                        .filter(show::folder_year.eq(i32::from(year)))
+                        .select(show::id)
+                        .first(conn)?;
+                    let state: Option<String> = show_metadata::table
+                        .find(show_id)
+                        .select(show_metadata::match_state)
+                        .first(conn)
+                        .optional()?;
+                    if state.as_deref() != Some(MATCHED) {
+                        apply_show_match(conn, show_id, found)?;
+                    }
+                    let owner = Owner::Episode(episode_id);
+                    Ok((
+                        attached(media_files::attach(conn, &id, owner)?)?,
+                        Some(show_id),
+                    ))
                 })
             })
             .await

@@ -30,7 +30,7 @@ use tracing::{info, warn};
 
 mod admin;
 
-pub use admin::Corrected;
+pub use admin::{AttachNew, Corrected};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::catalogue::{
