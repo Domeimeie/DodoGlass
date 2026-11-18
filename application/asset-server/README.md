@@ -37,13 +37,13 @@ Other tasks (from this folder): `go-task test`, `go-task lint`, `go-task fmt`, `
 
 | Module | What it does |
 |---|---|
-| `catalogue/` | The core: placing uploads (`placement.rs`), Media file states, Labels and the Default media file per owner (`media_files.rs`), Movies and what viewers see (`movies.rs`), Shows, Seasons and Episodes (`shows.rs`), Unassigned media files and attaching them (`unassigned.rs`), TMDB outcomes and Locked fields of Movies (`metadata.rs`) and of Shows, Seasons and Episodes (`show_metadata.rs`), the admin's changes: default, Labels, removing Media files, deleting Hidden entries (`admin.rs`). Everything else goes through it |
+| `catalogue/` | The core: placing uploads (`placement.rs`), Media file states, Labels and the Default media file per owner (`media_files.rs`), Movies and what viewers see (`movies.rs`), Shows, Seasons and Episodes (`shows.rs`), Unassigned media files and attaching them (`unassigned.rs`), TMDB outcomes and Locked fields of Movies (`metadata.rs`) and of Shows, Seasons and Episodes (`show_metadata.rs`), fields edited by hand (locking them), unlocking, and what a picked Match or refresh applies to (`corrections.rs`), the admin's changes: default, Labels, removing Media files, deleting Hidden entries (`admin.rs`). Everything else goes through it |
 | `ports/` | Upload events (`upload_events.rs`, MQTT in `mqtt.rs`), status hints (`status_hints.rs`, MQTT in `mqtt_status.rs`), buckets (`storage.rs`), the clock (`clock.rs`), TMDB (`tmdb.rs`: the `Tmdb` trait and the reqwest client) |
 | `ingest/` | The ingest listener: S3 events → `Catalogue::upload_seen`, ack after storing |
 | `reconcile.rs` | Output markers in `final` → Ready, Missing, Failed after 24 h; unseen outputs placed from their marker |
 | `status.rs` | The status listener: `completed` → early reconcile of that Media file, `failed` → Failed |
-| `matcher.rs` | TMDB lookups for new Movies and Shows (strict Match, Needs review, retries with backoff), Seasons and Episodes of matched Shows by number, image download |
-| `http/` | axum routes, one module per part of the API (`movies.rs`, `shows.rs`, `images.rs`), merged in `mod.rs`. The admin API is `http/admin/` (`media_files.rs`, `hidden.rs`, `review.rs`, `unassigned.rs`), nested under `/admin`: add a module there and merge its `routes()` (paths relative to `/admin`) in `admin/mod.rs` |
+| `matcher/` | TMDB lookups for new Movies and Shows (strict Match, Needs review, retries with backoff), Seasons and Episodes of matched Shows by number, image download (`mod.rs`); the lookups an admin asks for: picking a Match, refresh, attaching to a new Movie or Show from a TMDB id (`admin.rs`) |
+| `http/` | axum routes, one module per part of the API (`movies.rs`, `shows.rs`, `images.rs`), merged in `mod.rs`. Handlers take `State<Catalogue>`, or `State<Matcher>` for what needs TMDB (both from `ApiState`). The admin API is `http/admin/` (`media_files.rs`, `hidden.rs`, `review.rs`, `unassigned.rs`, `corrections.rs`: Match, refresh, edit and unlock), nested under `/admin`: add a module there and merge its `routes()` (paths relative to `/admin`) in `admin/mod.rs` |
 | `app.rs` | Builds everything; used by `main.rs` and by the tests |
 | `db.rs`, `migrations/` | SQLite connection, portable-SQL migrations (ADR 0002) |
 
@@ -84,7 +84,8 @@ What `TestApp` offers:
   finds nothing). `add_movie(common::tmdb::movie(603, "The Matrix", 1999))`,
   `add_show(tmdb::show(1396, "Breaking Bad", 2008))`, `add_season(1396, 1, tmdb::season("Season
   1"))`, `add_episode(1396, 1, 2, tmdb::episode(62086, "Cat's in the Bag...", "2008-01-27"))`
-  (Seasons and Episodes it lacks answer "not found"), `add_image(path, bytes)`,
+  (Seasons and Episodes it lacks answer "not found"; adding one again with the same id replaces
+  it: "TMDB's entry changed"), `add_image(path, bytes)`,
   `set_unreachable(true)`, `calls()`, `searches()`.
 - **Triggers:** `reconcile()`, `match_metadata()` (one pass of TMDB lookups and due retries),
   `restart()` (same database and buckets, so the startup reconcile runs:

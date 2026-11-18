@@ -121,7 +121,29 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   layout) attaches it to that existing Movie or Episode → `{"id", "label"}`. The Label follows the
   upload rule ("matrix (mkv)" if "matrix" is taken); it becomes the default only if the owner had no
   Media file. 404 if the Media file is not Unassigned or the target does not exist. A re-upload to
-  the same path keeps it attached.
+  the same path keeps it attached. With `{"new_movie": {"tmdb_id"}}` or `{"new_episode":
+  {"tmdb_id", "season", "number"}}` it is attached to a new Movie, or an Episode of a new Show,
+  created from TMDB with that Match; its folder is TMDB's name and year, so later uploads to
+  `movies/<name> (<year>)/` join it (an existing entry with that folder is used, and matched unless
+  it has a Match). A Show's Seasons and Episodes are looked up at once. 400 if TMDB does not know the
+  id, 503 if TMDB is unavailable; nothing is created then.
+- **Metadata corrections** (admin API; paths as in the read API):
+  `PUT /admin/movies/<id>/match` and `PUT /admin/shows/<id>/match` with `{"tmdb_id"}` (a candidate's
+  or any other) make it the **Match**: every field that is not locked is refilled and the entry
+  leaves Needs review (204). For a Show whose Match changes, its Seasons and Episodes lose what they
+  had from the old one (Locked fields kept) and are looked up again by number in the same request.
+  `POST /admin/movies/<id>/refresh` and `/admin/shows/<id>/refresh` fetch the entry from TMDB again
+  by its Match (a Show with its Seasons and Episodes), or search again as for a new entry if it has
+  none. `POST /admin/shows/<id>/seasons/<n>/refresh` and `.../episodes/<n>/refresh` look one Season
+  or Episode up again (409 if its Show has no Match). Errors: 404 unknown entry, 400 TMDB does not
+  know the id, 503 TMDB unavailable.
+  `PATCH /admin/movies/<id>`, `/admin/shows/<id>`, `/admin/shows/<id>/seasons/<n>` and
+  `.../episodes/<n>` with fields to set (e.g. `{"description": "...", "year": 2000}`; `null` empties
+  a field other than a Movie's or Show's name and year) set them and make them **Locked fields** →
+  `{"locked_fields": [...]}`; 400 for a field the entry does not have or a wrong value.
+  `DELETE <the same path>/locks/<field>` unlocks one → the Locked fields left; the next Match or
+  refresh fills it from TMDB again. Edits show in the read API also before a Match. An entry edited
+  before its first lookup is still looked up (its metadata row is created as due).
 - **Database:** SQLite via Diesel, migrations in portable SQL run at startup. Tables so far: `movie`
   (with `folder_name`/`folder_year`, the placement identity, apart from the displayed `name`/`year`)
   and `media_file`; `show` (same folder identity), `season`, `episode`, and `media_file.episode_id`;
@@ -133,9 +155,7 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   `name`, `description`, `image`; Episode also `air_date`, `imdb_id`. A Match or lookup never writes
   a locked field.
 
-Not built yet: the rest of the admin API (picking a Match, editing and locking fields, refresh,
-listing Hidden entries). Picking another Match for a Show has to clear its Seasons' and Episodes'
-metadata rows (keeping Locked fields) so the next pass refills them.
+Not built yet: listing Hidden entries in the admin API (not part of the first spec).
 
 **Running it:** `go-task infra:up`, `go-task transcoder:serve-s3`, `go-task asset-server:serve`
 (HTTP on `127.0.0.1:8090`), then for example
