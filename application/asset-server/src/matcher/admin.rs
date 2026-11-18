@@ -42,4 +42,20 @@ impl Matcher {
         self.catalogue.movie_matched(movie_id, found).await?;
         Ok(Corrected::Done)
     }
+
+    /// Fetches Movie `movie_id` from TMDB again: by its Match when it has
+    /// one, else by searching for it as when it was new (it may then get a
+    /// Match, stay in Needs review or be retried). Locked fields are kept.
+    pub async fn refresh_movie(&self, movie_id: i32) -> Result<Corrected> {
+        let Some(movie) = self.catalogue.movie_lookup(movie_id).await? else {
+            return Ok(Corrected::NotFound("no such movie".into()));
+        };
+        match movie.tmdb_id {
+            Some(tmdb_id) => self.pick_movie_match(movie_id, tmdb_id).await,
+            None => {
+                self.look_up(movie.lookup).await?;
+                Ok(Corrected::Done)
+            }
+        }
+    }
 }

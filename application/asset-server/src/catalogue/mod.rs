@@ -37,7 +37,7 @@ use crate::db::Db;
 use crate::ports::clock::Clock;
 
 pub use admin::{Change, Entry};
-pub use corrections::MovieLookup;
+pub use corrections::{Edited, MovieLookup};
 pub use media_files::{
     Manifests, MediaFileState, MediaFileStatus, PROCESSING_TIMEOUT_MS, TIMED_OUT, TrackedMediaFile,
 };

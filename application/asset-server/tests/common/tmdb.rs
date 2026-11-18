@@ -76,21 +76,29 @@ pub fn episode(tmdb_id: i64, name: &str, air_date: &str) -> EpisodeDetails {
 }
 
 impl FakeTmdb {
+    /// Adds a Movie, or replaces the one with the same TMDB id (TMDB's
+    /// entry changed).
     pub fn add_movie(&self, movie: MovieDetails) {
-        self.state.lock().unwrap().movies.push(movie);
+        let movies = &mut self.state.lock().unwrap().movies;
+        movies.retain(|m| m.tmdb_id != movie.tmdb_id);
+        movies.push(movie);
     }
 
+    /// Adds a Show, or replaces the one with the same TMDB id.
     pub fn add_show(&self, show: ShowDetails) {
-        self.state.lock().unwrap().shows.push(show);
+        let shows = &mut self.state.lock().unwrap().shows;
+        shows.retain(|s| s.tmdb_id != show.tmdb_id);
+        shows.push(show);
     }
 
-    /// Season `number` of the Show with TMDB id `show`.
+    /// Season `number` of the Show with TMDB id `show` (replacing it if known).
     pub fn add_season(&self, show: i64, number: i32, season: SeasonDetails) {
         let mut state = self.state.lock().unwrap();
         state.seasons.insert((show, number), season);
     }
 
-    /// Episode `number` of Season `season` of the Show with TMDB id `show`.
+    /// Episode `number` of Season `season` of the Show with TMDB id `show`
+    /// (replacing it if known).
     pub fn add_episode(&self, show: i64, season: i32, number: i32, episode: EpisodeDetails) {
         let mut state = self.state.lock().unwrap();
         state.episodes.insert((show, season, number), episode);

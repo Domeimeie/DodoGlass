@@ -46,6 +46,11 @@ impl LockedFields {
     pub fn unlock(&mut self, field: &str) {
         self.0.remove(field);
     }
+
+    /// The locked field names, in order.
+    pub fn fields(&self) -> Vec<String> {
+        self.0.iter().cloned().collect()
+    }
 }
 
 /// A Movie waiting for a TMDB lookup.
@@ -84,7 +89,8 @@ pub struct Candidate {
     pub poster_path: Option<String>,
 }
 
-/// The metadata part of a Movie in the read API; absent until a Match.
+/// The metadata part of a Movie in the read API; absent until a Match or an
+/// admin's edit.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MovieMetadataView {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -117,7 +123,8 @@ struct MetadataRow {
     image_key: Option<String>,
 }
 
-/// Fills the metadata part of `movies` (keyed by Movie id).
+/// Fills the metadata part of `movies` (keyed by Movie id): what a Match
+/// filled in, and fields an admin edited (also before a Match).
 pub(super) fn fill_views(
     conn: &mut SqliteConnection,
     movies: &mut [(i32, MovieView)],
@@ -125,7 +132,6 @@ pub(super) fn fill_views(
     let ids: Vec<i32> = movies.iter().map(|(id, _)| *id).collect();
     let rows: Vec<MetadataRow> = movie_metadata::table
         .filter(movie_metadata::movie_id.eq_any(&ids))
-        .filter(movie_metadata::match_state.eq(MATCHED))
         .select(MetadataRow::as_select())
         .load(conn)?;
     for row in rows {

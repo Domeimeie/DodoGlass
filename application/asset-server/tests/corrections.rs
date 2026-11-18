@@ -4,7 +4,9 @@
 
 mod common;
 
-use axum::http::StatusCode;
+use asset_server::ports::tmdb::MovieDetails;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use common::TestApp;
 use common::tmdb::movie;
 use serde_json::{Value, json};
@@ -101,4 +103,151 @@ async fn a_match_tmdb_does_not_know_or_cannot_answer_is_refused() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let review = app.get_json("/admin/needs-review").await;
     assert_eq!(review["movies"][0]["id"], *id);
+}
+
+#[tokio::test]
+async fn an_edited_field_is_locked_and_kept_when_another_match_is_picked() {
+    let app = TestApp::start().await;
+    app.tmdb.add_movie(movie(603, "The Matrix", 1999));
+    app.tmdb.add_movie(movie(9999, "The Matrix Remade", 1999));
+    ready(&app, MATRIX).await;
+    let id = only_movie(&app).await["id"].clone();
+
+    let (status, body) = app
+        .send_json(
+            "PATCH",
+            &format!("/admin/movies/{id}"),
+            json!({ "description": "My own words." }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["locked_fields"], json!(["description"]));
+    assert_eq!(
+        only_movie(&app).await["description"],
+        json!("My own words.")
+    );
+
+    let (status, _) = app
+        .send_json(
+            "PUT",
+            &format!("/admin/movies/{id}/match"),
+            json!({ "tmdb_id": 9999 }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let listed = only_movie(&app).await;
+    assert_eq!(listed["description"], json!("My own words."));
+    assert_eq!(listed["name"], json!("The Matrix Remade"));
+    assert_eq!(listed["imdb_id"], json!("tt0009999"));
+}
+
+#[tokio::test]
+async fn a_refresh_pulls_in_tmdb_changes_except_locked_fields_until_unlocked() {
+    let app = TestApp::start().await;
+    app.tmdb.add_movie(movie(603, "The Matrix", 1999));
+    ready(&app, MATRIX).await;
+    let id = only_movie(&app).await["id"].clone();
+    app.send_json(
+        "PATCH",
+        &format!("/admin/movies/{id}"),
+        json!({ "name": "Matrix", "year": 2000 }),
+    )
+    .await;
+    app.tmdb.add_movie(MovieDetails {
+        overview: Some("Neo wakes up.".into()),
+        ..movie(603, "The Matrix", 1999)
+    });
+
+    let (status, body) = app
+        .send_json("POST", &format!("/admin/movies/{id}/refresh"), json!({}))
+        .await;
+
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let listed = only_movie(&app).await;
+    assert_eq!(listed["description"], json!("Neo wakes up."));
+    assert_eq!(listed["name"], json!("Matrix"));
+    assert_eq!(listed["year"], json!(2000));
+
+    let (status, body) = app
+        .request(
+            Request::delete(format!("/admin/movies/{id}/locks/name"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["locked_fields"], json!(["year"]));
+    app.send_json("POST", &format!("/admin/movies/{id}/refresh"), json!({}))
+        .await;
+
+    let listed = only_movie(&app).await;
+    assert_eq!(listed["name"], json!("The Matrix"));
+    assert_eq!(listed["year"], json!(2000));
+}
+
+#[tokio::test]
+async fn a_movie_edited_before_its_first_lookup_is_still_looked_up() {
+    let app = TestApp::start().await;
+    app.tmdb.add_movie(movie(603, "The Matrix", 1999));
+    app.upload(MATRIX).await;
+    app.finish_transcode(MATRIX).await;
+    app.reconcile().await;
+    let id = only_movie(&app).await["id"].clone();
+    app.send_json(
+        "PATCH",
+        &format!("/admin/movies/{id}"),
+        json!({ "description": "My own words." }),
+    )
+    .await;
+
+    app.match_metadata().await;
+
+    let listed = only_movie(&app).await;
+    assert_eq!(listed["tmdb_id"], json!(603));
+    assert_eq!(listed["description"], json!("My own words."));
+}
+
+#[tokio::test]
+async fn a_movie_in_needs_review_shows_its_edited_fields() {
+    let app = TestApp::start().await;
+    two_matrices(&app);
+    ready(&app, MATRIX).await;
+    let id = only_movie(&app).await["id"].clone();
+
+    app.send_json(
+        "PATCH",
+        &format!("/admin/movies/{id}"),
+        json!({ "description": "My own words.", "imdb_id": "tt0133093" }),
+    )
+    .await;
+
+    let listed = only_movie(&app).await;
+    assert_eq!(listed["description"], json!("My own words."));
+    assert_eq!(listed["imdb_id"], json!("tt0133093"));
+    let review = app.get_json("/admin/needs-review").await;
+    assert_eq!(review["movies"][0]["id"], id);
+}
+
+#[tokio::test]
+async fn an_edit_of_a_field_the_entry_does_not_have_is_refused() {
+    let app = TestApp::start().await;
+    ready(&app, MATRIX).await;
+    let id = only_movie(&app).await["id"].clone();
+    let uri = format!("/admin/movies/{id}");
+
+    for bad in [
+        json!({ "air_date": "1999-03-31" }),
+        json!({ "year": "1999" }),
+        json!({ "name": "" }),
+        json!({}),
+    ] {
+        let (status, _) = app.send_json("PATCH", &uri, bad.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (status, _) = app
+        .send_json("PATCH", "/admin/movies/999", json!({ "name": "X" }))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(only_movie(&app).await["name"], json!("The Matrix"));
 }

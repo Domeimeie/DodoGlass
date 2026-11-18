@@ -103,7 +103,8 @@ pub struct NeedsReviewShow {
     pub candidates: Vec<Candidate>,
 }
 
-/// The metadata part of a Show in the read API; absent until a Match.
+/// The metadata part of a Show in the read API; absent until a Match or an
+/// admin's edit.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ShowMetadataView {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -160,11 +161,11 @@ pub(super) struct EpisodeMetadataRow {
     pub locked_fields: String,
 }
 
-/// The matched metadata of these Shows.
+/// The metadata of these Shows: what a Match filled in, and fields an admin
+/// edited (also before a Match).
 pub(super) fn show_rows(conn: &mut SqliteConnection, ids: &[i32]) -> Result<Vec<ShowMetadataRow>> {
     Ok(show_metadata::table
         .filter(show_metadata::show_id.eq_any(ids))
-        .filter(show_metadata::match_state.eq(MATCHED))
         .select(ShowMetadataRow::as_select())
         .load(conn)?)
 }
