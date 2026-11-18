@@ -2,7 +2,8 @@
 
 The catalogue of Movies, Shows (Seasons, Episodes) and their Media files. It listens for uploads to
 the `ingest` bucket, places each one in the catalogue from its path (ADR 0003), and marks it Ready
-once the transcoder's output marker appears in `final` (ADR 0001). The HTTP API serves the catalogue.
+once the transcoder's output marker appears in `final` (ADR 0001). New Movies are matched against
+TMDB, and their posters stored in `assets`. The HTTP API serves the catalogue and the images.
 
 Design: [Asset server architecture page](../../docs/architecture/asset-server.md). Terms:
 `GLOSSARY.md` at the repository root.
@@ -22,6 +23,9 @@ curl -s localhost:8090/movies       # listed once the transcoder's `completed` s
                                     # (or after the next reconcile: every 300 s, --reconcile-interval)
 ```
 
+TMDB lookups need an API key (v3 key or v4 read access token): `ASSETS_TMDB_API_KEY=... go-task
+asset-server:serve`. Without one, Movies keep the name and year from their folder.
+
 `go-task asset-server:serve -- --help` lists every setting. Each one can also be set with an
 `ASSETS_*` environment variable. The database is `assets.db` in this folder by default; migrations
 run at startup.
@@ -33,12 +37,13 @@ Other tasks (from this folder): `go-task test`, `go-task lint`, `go-task fmt`, `
 
 | Module | What it does |
 |---|---|
-| `catalogue/` | The core: placing uploads (`placement.rs`), Media file states, Labels and the Default media file per owner (`media_files.rs`), Movies and what viewers see (`movies.rs`), Shows, Seasons and Episodes (`shows.rs`), Unassigned media files and attaching them (`unassigned.rs`). Everything else goes through it |
-| `ports/` | Upload events (`upload_events.rs`, MQTT in `mqtt.rs`), status hints (`status_hints.rs`, MQTT in `mqtt_status.rs`), buckets (`storage.rs`), the clock (`clock.rs`) |
+| `catalogue/` | The core: placing uploads (`placement.rs`), Media file states, Labels and the Default media file per owner (`media_files.rs`), Movies and what viewers see (`movies.rs`), Shows, Seasons and Episodes (`shows.rs`), Unassigned media files and attaching them (`unassigned.rs`), TMDB outcomes and Locked fields (`metadata.rs`). Everything else goes through it |
+| `ports/` | Upload events (`upload_events.rs`, MQTT in `mqtt.rs`), status hints (`status_hints.rs`, MQTT in `mqtt_status.rs`), buckets (`storage.rs`), the clock (`clock.rs`), TMDB (`tmdb.rs`: the `Tmdb` trait and the reqwest client) |
 | `ingest/` | The ingest listener: S3 events → `Catalogue::upload_seen`, ack after storing |
 | `reconcile.rs` | Output markers in `final` → Ready, Missing, Failed after 24 h; unseen outputs placed from their marker |
 | `status.rs` | The status listener: `completed` → early reconcile of that Media file, `failed` → Failed |
-| `http/` | axum routes, one module per part of the API (`movies.rs`, `shows.rs`), merged in `mod.rs`. The admin API is `http/admin/` (`media_files.rs`, `unassigned.rs`), nested under `/admin`: add a module there and merge its `routes()` (paths relative to `/admin`) in `admin/mod.rs` |
+| `matcher.rs` | TMDB lookups for new Movies: strict Match, Needs review, retries with backoff, poster download |
+| `http/` | axum routes, one module per part of the API (`movies.rs`, `shows.rs`, `images.rs`), merged in `mod.rs`. The admin API is `http/admin/` (`media_files.rs`, `review.rs`, `unassigned.rs`), nested under `/admin`: add a module there and merge its `routes()` (paths relative to `/admin`) in `admin/mod.rs` |
 | `app.rs` | Builds everything; used by `main.rs` and by the tests |
 | `db.rs`, `migrations/` | SQLite connection, portable-SQL migrations (ADR 0002) |
 
@@ -75,15 +80,20 @@ What `TestApp` offers:
 - **Status hints:** `send_completed(key)`, `fail_transcode(key, error)`, or any
   `send_status(json)` (e.g. `common::status_message(key, event, error)`); each returns once the status
   listener has handled it.
-- **Triggers:** `reconcile()`, `restart()` (same database and buckets, so the startup reconcile runs:
+- **TMDB:** `app.tmdb` is a `FakeTmdb` (`tests/common/tmdb.rs`), empty by default (every search
+  finds nothing). `add_movie(common::tmdb::movie(603, "The Matrix", 1999))`, `add_image(path,
+  bytes)`, `set_unreachable(true)`, `calls()`.
+- **Triggers:** `reconcile()`, `match_metadata()` (one pass of TMDB lookups and due retries),
+  `restart()` (same database and buckets, so the startup reconcile runs:
   "the asset server was down"), `advance(duration)` to move the fake clock.
-- **HTTP:** `get(uri)` → `(status, json)`, `get_json(uri)` (asserts 200), `send_json(method, uri,
+- **HTTP:** `get(uri)` → `(status, json)`, `get_json(uri)` (asserts 200), `get_bytes(uri)` →
+  `(status, content type, body)`, `send_json(method, uri,
   body)`, `request(request)`.
 
 `upload` and `send_event` return once the listener has acknowledged the message, so the next line can
 rely on it being stored. Each `TestApp` has its own in-memory SQLite database with the real
-migrations, so tests run in parallel. A new port (e.g. a TMDB fake) goes into `tests/common/mod.rs`
-and is passed to `App::start` next to the buckets and the clock.
+migrations, so tests run in parallel. A new port's fake goes into `tests/common/` (like `tmdb.rs`)
+and is passed to `App::start` next to the buckets, the clock and TMDB.
 
 Put scenarios in a file per topic (`tests/movies.rs`, `tests/media_files.rs`, `tests/shows.rs`, ...), each starting with
 `mod common;`.

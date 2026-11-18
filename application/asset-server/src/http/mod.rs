@@ -5,6 +5,7 @@
 
 mod admin;
 mod error;
+pub mod images;
 mod movies;
 mod shows;
 

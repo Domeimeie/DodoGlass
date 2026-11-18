@@ -7,9 +7,12 @@
 //! - [`media_files`]: Media file states (Processing, Ready, Failed, Missing);
 //! - [`movies`]: Movies, and what viewers see of them;
 //! - [`shows`]: Shows, Seasons and Episodes, and what viewers see of them;
-//! - [`unassigned`]: Unassigned media files, and attaching them.
+//! - [`unassigned`]: Unassigned media files, and attaching them;
+//! - [`metadata`]: what TMDB lookups found (Match, Needs review, retries)
+//!   and Locked fields.
 
 mod media_files;
+mod metadata;
 mod movies;
 mod placement;
 pub(crate) mod schema;
@@ -23,6 +26,10 @@ use crate::ports::clock::Clock;
 
 pub use media_files::{
     Manifests, MediaFileState, MediaFileStatus, PROCESSING_TIMEOUT_MS, TIMED_OUT, TrackedMediaFile,
+};
+pub use metadata::{
+    Candidate, LOCKABLE_FIELDS, LockedFields, MovieMatch, MovieMetadataView, NeedsReviewMovie,
+    PendingLookup,
 };
 pub use movies::{MediaFileView, MovieView};
 pub use shows::{EpisodeView, SeasonView, ShowView};

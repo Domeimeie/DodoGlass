@@ -81,6 +81,7 @@ name = "asset-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "clap",
  "diesel",
@@ -91,6 +92,7 @@ dependencies = [
  "libsqlite3-sys",
  "object_store",
  "percent-encoding",
+ "reqwest",
  "rumqttc",
  "serde",
  "serde_json",

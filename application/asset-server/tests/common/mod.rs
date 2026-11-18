@@ -6,12 +6,16 @@
 //! - status hints come from [`InMemoryStatusHints`], fed by [`TestApp::send_status`];
 //! - the `ingest`, `final` and `assets` buckets are `object_store` in memory;
 //! - the clock is a [`FakeClock`] the test moves forward;
+//! - TMDB is a [`FakeTmdb`] (`tmdb.rs`), empty until the test adds Movies;
 //! - SQLite runs in memory, with the real migrations.
 //!
 //! Nothing runs on a timer: reconcile happens when the test calls
-//! [`TestApp::reconcile`] (or at [`TestApp::restart`], like at a real startup).
+//! [`TestApp::reconcile`] (or at [`TestApp::restart`], like at a real startup),
+//! TMDB lookups (and their retries) when it calls [`TestApp::match_metadata`].
 
 #![allow(dead_code)] // each test file uses a different part of the harness
+
+pub mod tmdb;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,6 +39,8 @@ use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
 
+use tmdb::FakeTmdb;
+
 /// A real event RustFS published for an upload of `sample.mp4` to `ingest`.
 const RUSTFS_EVENT: &str = include_str!("../../../transcoder/tests/fixtures/rustfs-event.json");
 
@@ -43,6 +49,7 @@ pub struct TestApp {
     router: Router,
     pub buckets: Buckets,
     pub clock: Arc<FakeClock>,
+    pub tmdb: Arc<FakeTmdb>,
     database: String,
     events: UploadEventSender,
     listener: JoinHandle<()>,
@@ -65,15 +72,26 @@ impl TestApp {
             final_: Arc::new(InMemory::new()),
             assets: Arc::new(InMemory::new()),
         };
-        Self::start_on(database, buckets, Arc::new(FakeClock::default())).await
+        Self::start_on(
+            database,
+            buckets,
+            Arc::new(FakeClock::default()),
+            Arc::new(FakeTmdb::default()),
+        )
+        .await
     }
 
-    async fn start_on(database: String, buckets: Buckets, clock: Arc<FakeClock>) -> Self {
+    async fn start_on(
+        database: String,
+        buckets: Buckets,
+        clock: Arc<FakeClock>,
+        tmdb: Arc<FakeTmdb>,
+    ) -> Self {
         let config = Config {
             database: database.clone(),
             ..Config::default()
         };
-        let app = App::start(config, buckets.clone(), clock.clone())
+        let app = App::start(config, buckets.clone(), clock.clone(), tmdb.clone())
             .await
             .expect("the asset server starts");
         let (events, source) = InMemoryUploadEvents::new();
@@ -87,6 +105,7 @@ impl TestApp {
             app,
             buckets,
             clock,
+            tmdb,
             database,
             events,
             listener,
@@ -101,6 +120,7 @@ impl TestApp {
             app,
             buckets,
             clock,
+            tmdb,
             database,
             listener,
             status_listener,
@@ -111,7 +131,7 @@ impl TestApp {
         // Keep the in-memory database alive while the old app goes away.
         let keep = app.database();
         drop(app);
-        let restarted = Self::start_on(database, buckets, clock).await;
+        let restarted = Self::start_on(database, buckets, clock, tmdb).await;
         drop(keep);
         restarted
     }
@@ -198,6 +218,11 @@ impl TestApp {
         self.app.reconcile().await.expect("reconcile");
     }
 
+    /// One pass of TMDB lookups: new Movies, and retries that are due.
+    pub async fn match_metadata(&self) {
+        self.app.match_metadata().await.expect("metadata pass");
+    }
+
     pub fn advance(&self, by: Duration) {
         self.clock.advance(by);
     }
@@ -214,6 +239,19 @@ impl TestApp {
         let (status, body) = self.get(uri).await;
         assert_eq!(status, StatusCode::OK, "GET {uri}: {body}");
         body
+    }
+
+    /// GET of anything that is not JSON (images): status, content type, body.
+    pub async fn get_bytes(&self, uri: &str) -> (StatusCode, Option<String>, Vec<u8>) {
+        let request = Request::get(uri).body(Body::empty()).unwrap();
+        let response = self.router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .map(|v| v.to_str().unwrap().to_string());
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, content_type, bytes.to_vec())
     }
 
     pub async fn send_json(&self, method: &str, uri: &str, body: Value) -> (StatusCode, Value) {
