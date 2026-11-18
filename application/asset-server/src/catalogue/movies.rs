@@ -24,6 +24,8 @@ pub struct MovieView {
 pub struct MediaFileView {
     pub id: String,
     pub label: String,
+    /// Whether this is the Default media file of its Movie or Episode.
+    pub default: bool,
     pub manifests: Manifests,
 }
 
@@ -60,6 +62,7 @@ struct MovieRow {
 struct ReadyMediaFileRow {
     id: String,
     label: String,
+    is_default: bool,
     hls_manifest: Option<String>,
     dash_manifest: Option<String>,
 }
@@ -95,6 +98,7 @@ impl Catalogue {
                     movie.media_files.push(MediaFileView {
                         id: file.id,
                         label: file.label,
+                        default: file.is_default,
                         manifests: Manifests {
                             hls: file.hls_manifest,
                             dash: file.dash_manifest,

@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use asset_server::app::{App, Config};
 use asset_server::ports::clock::SystemClock;
 use asset_server::ports::mqtt::{MqttSettings, MqttUploadEvents};
+use asset_server::ports::mqtt_status::{MqttStatusHints, MqttStatusSettings};
 use asset_server::ports::storage::{Buckets, S3Settings};
 use asset_server::ports::tmdb::{NoTmdb, Tmdb, TmdbClient, TmdbSettings};
 use clap::{Parser, ValueEnum};
@@ -42,9 +43,17 @@ struct Cli {
     #[arg(long, env = "ASSETS_MQTT_GROUP", default_value = "assets")]
     mqtt_group: String,
 
-    /// MQTT client id [default: assets-<hostname>-<pid>]
+    /// MQTT client id [default: assets-<hostname>-<pid>]; the status connection adds `-status`
     #[arg(long, env = "ASSETS_MQTT_CLIENT_ID")]
     mqtt_client_id: Option<String>,
+
+    /// Topic the transcoders publish their status on (hints for an early reconcile)
+    #[arg(
+        long,
+        env = "ASSETS_MQTT_STATUS_TOPIC",
+        default_value = "dodoglass/status"
+    )]
+    mqtt_status_topic: String,
 
     /// S3 endpoint, e.g. http://localhost:9000
     #[arg(long, env = "ASSETS_S3_ENDPOINT")]
@@ -152,14 +161,22 @@ async fn run(cli: Cli) -> Result<()> {
     let app = App::start(config, buckets, Arc::new(SystemClock), tmdb).await?;
     info!(database = %cli.database, "catalogue open, startup reconcile done");
 
+    let client_id = cli.mqtt_client_id.unwrap_or_else(default_client_id);
     let events = MqttUploadEvents::connect(MqttSettings {
-        broker: cli.mqtt_url,
+        broker: cli.mqtt_url.clone(),
         topic: cli.mqtt_topic,
         group: cli.mqtt_group,
-        client_id: cli.mqtt_client_id.unwrap_or_else(default_client_id),
+        client_id: client_id.clone(),
     })
     .await?;
     app.spawn_ingest_listener(events);
+    let hints = MqttStatusHints::connect(MqttStatusSettings {
+        broker: cli.mqtt_url,
+        topic: cli.mqtt_status_topic,
+        client_id: format!("{client_id}-status"),
+    })
+    .await?;
+    app.spawn_status_listener(hints);
     app.spawn_periodic_reconcile(Duration::from_secs(cli.reconcile_interval));
     if cli.tmdb_api_key.is_some() {
         app.spawn_periodic_matcher(Duration::from_secs(cli.tmdb_interval));

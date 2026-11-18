@@ -20,20 +20,48 @@ in `docs/adr/` (ADR 0001–0004).
 
 ## Built so far
 
-The tracer bullet: a Movie upload becomes listable.
+The tracer bullet (a Movie upload becomes listable), then Shows.
 
 - **Ingest listener** on `$share/assets/dodoglass/ingest`. It reads the standard S3 part of each
   event, URL-decodes the keys, handles several records per message, and acknowledges a message only
   after it is stored.
 - **Placement of Movies:** `movies/<Name> (<Year>)/<label>.<ext>` creates the Movie (or finds it) and
   a **Processing** Media file whose id is the shared crate's task id. Keys are normalised to NFC.
-  Every other upload is stored without a Movie (Unassigned); Shows come next.
+- **Placement of Episodes:** `shows/<Name> (<Year>)/Season <n>/S<nn>E<nn>…` (or `Specials/`, Season
+  0) finds or creates the Show (by folder name and year), its Season (by number) and its Episode (by
+  number), and a Processing Media file attached to the Episode. Every other upload is stored without
+  a Movie or Episode (Unassigned).
+- **Several Media files per Movie:** each one's Label is its file name without the extension, made
+  unique within the Movie (`matrix.mkv` + `matrix.mp4` → "matrix", "matrix (mp4)"; a number is
+  added if that is taken too). The first one uploaded is the **Default media file**. A re-upload to
+  the same path keeps the id, Label and default flag and goes back to Processing. Labels and the
+  default are kept per *owner* of the Media file (`media_file.is_default`, unique indexes per
+  owner), so Movies and Episodes follow the same rules.
 - **Reconciler:** a Processing Media file becomes **Ready** when `final/<id>/source.json` exists, at
   startup and every `--reconcile-interval` seconds (default 300). Its manifest keys follow the
-  `formats` in the marker.
+  `formats` in the marker. Each pass also checks the other states:
+  - a Ready Media file whose marker is gone becomes **Missing**, and Ready again when it is back;
+    it is never deleted automatically;
+  - a Media file Processing for more than 24 h whose input is still in `ingest` becomes **Failed**
+    (the transcoder deletes the input once done, so a gone input is not a failure);
+  - a Failed or Missing one whose marker is there becomes Ready (the marker is the source of truth,
+    ADR 0001; e.g. a task redelivered to another worker that finished it);
+  - a folder in `final` with no Media file is placed from the `input.key` of its marker, as Ready,
+    if that key gives the folder's id.
+- **Status hints:** the asset server subscribes to `dodoglass/status` (`--mqtt-status-topic`, its
+  own connection, client id `<id>-status`). `completed` reconciles that one Media file at once;
+  `failed` makes a Processing Media file **Failed** with the message's `error`. Other events are
+  ignored. Losing every hint only delays Ready until the next reconcile.
+- **Retry:** uploading to the same path again makes a Failed (or Ready) Media file Processing.
 - **Read API:** `GET /movies` lists the Movies that are not Hidden, with their Ready Media files:
-  `[{"name", "year", "media_files": [{"id", "label", "manifests": {"hls", "dash"}}]}]`. A matched
-  Movie also has `tmdb_id`, `imdb_id`, `description` and `image` (left out when unknown).
+  `[{"name", "year", "media_files": [{"id", "label", "default", "manifests": {"hls", "dash"}}]}]`,
+  the Media files ordered by Label. A matched Movie also has `tmdb_id`, `imdb_id`, `description`
+  and `image` (left out when unknown).
+  `GET /shows` → `[{"id", "name", "year"}]`, `GET /shows/{id}/seasons` → `[{"number"}]`,
+  `GET /shows/{id}/seasons/{number}/episodes` → `[{"number", "media_files": [...]}]` (Media files as
+  for Movies). Hidden applies at every level: an Episode needs a Ready Media file, a Season a listed
+  Episode, a Show a listed Season; a Hidden or unknown Show or Season answers 404. Processing,
+  Failed and Missing Media files are not listed.
 - **TMDB for Movies** (the *matcher*): each new Movie is looked up once, searching by its folder's
   name and year. Exactly one result with that year and the same name (ignoring case and punctuation)
   is a **Match**: name, year, imdbID, TMDB id, description and poster are filled in, except
@@ -45,15 +73,18 @@ The tracer bullet: a Movie upload becomes listable.
   Episode calls next. Without `--tmdb-api-key` no lookups run.
 - **Images:** a matched Movie's poster is downloaded once, in its original size, to
   `assets/posters/<TMDB file name>`; `GET /images/<key>` streams it. Browsing never calls TMDB.
-- **Admin API:** `GET /admin/needs-review` lists `{"movies": [{"id", "name", "year", "candidates":
-  [{"tmdb_id", "name", "year", "description", "poster_path"}]}]}`.
+- **Admin API (first part):** `GET /admin/media-files/<id>` → `{"id", "state", "error"}`, for any
+  state, 404 for an unknown id. `GET /admin/needs-review` → `{"movies": [{"id", "name", "year",
+  "candidates": [{"tmdb_id", "name", "year", "description", "poster_path"}]}]}`.
 - **Database:** SQLite via Diesel, migrations in portable SQL run at startup. Tables so far: `movie`
-  (with `folder_name`/`folder_year`, the placement identity, apart from the displayed `name`/`year`),
-  `media_file`, `movie_metadata` (match state, retry backoff, TMDB fields, `locked_fields` as a JSON
-  array of field names; no row = not looked up yet) and `movie_candidate`.
+  (with `folder_name`/`folder_year`, the placement identity, apart from the displayed `name`/`year`)
+  and `media_file`; `show` (same folder identity), `season`, `episode`, and `media_file.episode_id`;
+  `movie_metadata` (match state, retry backoff, TMDB fields, `locked_fields` as a JSON array of field
+  names; no row = not looked up yet) and `movie_candidate`.
 
-Not built yet: Shows, several Media files and Labels per Movie, Failed and Missing, status hints,
-TMDB for Shows, and the admin actions (pick a Match, edit and lock fields, refresh, ...).
+Not built yet: a new default when the default goes away, TMDB for Shows, Seasons and Episodes, and
+the rest of the admin API (picking a Match, editing and locking fields, refresh, listing Failed and
+Missing Media files).
 
 **Running it:** `go-task infra:up`, `go-task transcoder:serve-s3`, `go-task asset-server:serve`
 (HTTP on `127.0.0.1:8090`), then for example
@@ -129,6 +160,7 @@ stateDiagram-v2
     Processing --> Ready: source.json found
     Processing --> Failed: failed status, or > 24 h with input still in ingest
     Failed --> Processing: upload to the same path again
+    Failed --> Ready: source.json found
     Ready --> Processing: upload to the same path again (new version)
     Ready --> Missing: output gone from final
     Missing --> Ready: output back
@@ -200,7 +232,6 @@ erDiagram
         string image_key
         string match_state "matched, needs_review, retrying"
         text locked_fields
-        string default_media_file_id FK
     }
     SHOW {
         int id PK
@@ -232,7 +263,6 @@ erDiagram
         date air_date
         string imdb_id
         text locked_fields
-        string default_media_file_id FK
     }
     MEDIA_FILE {
         string id PK "task id"
@@ -240,6 +270,7 @@ erDiagram
         int movie_id FK "null if unassigned"
         int episode_id FK "null if unassigned"
         string label "unique per Movie or Episode"
+        bool is_default "one per Movie or Episode"
         string state "processing, ready, failed, missing"
         string hls_manifest
         string dash_manifest
@@ -247,7 +278,9 @@ erDiagram
     }
 ```
 
-A Media file belongs to a Movie **or** an Episode, or to neither while it is unassigned. Migrations
+A Media file belongs to a Movie **or** an Episode, or to neither while it is unassigned. The Default
+media file is a flag on the Media file rather than a column on its owner, so Movies and Episodes share
+one rule; partial unique indexes keep it to one per owner. Migrations
 stay within SQL that SQLite and Postgres both accept (ADR 0002).
 
 ## API

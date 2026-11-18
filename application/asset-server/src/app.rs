@@ -13,11 +13,12 @@ use crate::catalogue::Catalogue;
 use crate::db::Db;
 use crate::matcher::Matcher;
 use crate::ports::clock::Clock;
+use crate::ports::status_hints::StatusHints;
 use crate::ports::storage::Buckets;
 use crate::ports::tmdb::Tmdb;
 use crate::ports::upload_events::UploadEvents;
 use crate::reconcile::Reconciler;
-use crate::{http, ingest};
+use crate::{http, ingest, status};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -56,7 +57,12 @@ impl App {
         let database = config.database.clone();
         let db = tokio::task::spawn_blocking(move || Db::open(&database)).await??;
         let catalogue = Catalogue::new(db.clone(), clock);
-        let reconciler = Reconciler::new(catalogue.clone(), buckets.final_, &config.final_bucket);
+        let reconciler = Reconciler::new(
+            catalogue.clone(),
+            buckets.ingest,
+            buckets.final_,
+            &config.final_bucket,
+        );
         let matcher = Matcher::new(catalogue.clone(), tmdb, buckets.assets.clone());
         let app = App {
             db,
@@ -96,6 +102,15 @@ impl App {
     /// One reconcile pass.
     pub async fn reconcile(&self) -> Result<()> {
         self.reconciler.run_once().await
+    }
+
+    /// Handles status hints from `hints` until it closes.
+    pub fn spawn_status_listener(&self, hints: impl StatusHints) -> JoinHandle<()> {
+        tokio::spawn(status::run(
+            hints,
+            self.catalogue.clone(),
+            self.reconciler.clone(),
+        ))
     }
 
     /// Handles upload events from `events` until it closes.

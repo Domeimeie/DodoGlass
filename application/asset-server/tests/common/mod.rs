@@ -3,6 +3,7 @@
 //!
 //! The ports are replaced by in-memory versions:
 //! - upload events come from [`InMemoryUploadEvents`], fed by [`TestApp::upload`];
+//! - status hints come from [`InMemoryStatusHints`], fed by [`TestApp::send_status`];
 //! - the `ingest`, `final` and `assets` buckets are `object_store` in memory;
 //! - the clock is a [`FakeClock`] the test moves forward;
 //! - TMDB is a [`FakeTmdb`] (`tmdb.rs`), empty until the test adds Movies;
@@ -22,11 +23,13 @@ use std::time::Duration;
 
 use asset_server::app::{App, Config};
 use asset_server::ports::clock::FakeClock;
+use asset_server::ports::status_hints::{InMemoryStatusHints, StatusHintSender};
 use asset_server::ports::storage::Buckets;
 use asset_server::ports::upload_events::{InMemoryUploadEvents, UploadEventSender};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -50,6 +53,8 @@ pub struct TestApp {
     database: String,
     events: UploadEventSender,
     listener: JoinHandle<()>,
+    status: StatusHintSender,
+    status_listener: JoinHandle<()>,
 }
 
 impl TestApp {
@@ -91,7 +96,11 @@ impl TestApp {
             .expect("the asset server starts");
         let (events, source) = InMemoryUploadEvents::new();
         let listener = app.spawn_ingest_listener(source);
+        let (status, hints) = InMemoryStatusHints::new();
+        let status_listener = app.spawn_status_listener(hints);
         TestApp {
+            status,
+            status_listener,
             router: app.router(),
             app,
             buckets,
@@ -114,9 +123,11 @@ impl TestApp {
             tmdb,
             database,
             listener,
+            status_listener,
             ..
         } = self;
         listener.abort();
+        status_listener.abort();
         // Keep the in-memory database alive while the old app goes away.
         let keep = app.database();
         drop(app);
@@ -160,6 +171,36 @@ impl TestApp {
             &serde_json::to_vec_pretty(&marker).unwrap(),
         )
         .await;
+    }
+
+    /// A status message on `dodoglass/status`, as the transcoder publishes
+    /// it; returns once the status listener has handled it.
+    pub async fn send_status(&self, message: Value) {
+        self.status
+            .send(serde_json::to_vec(&message).unwrap())
+            .await;
+    }
+
+    /// The transcoder publishes `completed` for `key` (its output should be
+    /// in `final` already: see [`finish_transcode`](Self::finish_transcode)).
+    pub async fn send_completed(&self, key: &str) {
+        self.send_status(status_message(key, "completed", None))
+            .await;
+    }
+
+    /// The transcoder gives up on `key` and publishes `failed` with `error`.
+    pub async fn fail_transcode(&self, key: &str, error: &str) {
+        self.send_status(status_message(key, "failed", Some(error)))
+            .await;
+    }
+
+    /// Deletes everything under `prefix` (e.g. `<id>/`) in `bucket`.
+    pub async fn delete_prefix(&self, bucket: &Arc<dyn ObjectStore>, prefix: &str) {
+        let prefix = Path::parse(prefix).unwrap();
+        let objects: Vec<_> = bucket.list(Some(&prefix)).collect().await;
+        for object in objects {
+            bucket.delete(&object.unwrap().location).await.unwrap();
+        }
     }
 
     pub async fn put(&self, bucket: &Arc<dyn ObjectStore>, key: &str, content: &[u8]) {
@@ -237,6 +278,20 @@ impl TestApp {
         };
         (status, body)
     }
+}
+
+/// A status message of the transcoder for the task of `key`.
+pub fn status_message(key: &str, event: &str, error: Option<&str>) -> Value {
+    let mut message = json!({
+        "time_ms": 1_793_128_170_038u64,
+        "worker": "test-worker",
+        "task": dodoglass_ids::task_id_from_key(key),
+        "event": event,
+    });
+    if let Some(error) = error {
+        message["error"] = json!(error);
+    }
+    message
 }
 
 /// The fixture exactly as RustFS sent it (an upload of `sample.mp4`).
