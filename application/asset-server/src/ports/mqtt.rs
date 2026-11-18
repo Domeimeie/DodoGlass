@@ -149,7 +149,7 @@ impl Background {
 }
 
 /// `mqtt://host:port` → (host, port).
-fn parse_broker(url: &str) -> Result<(String, u16)> {
+pub(super) fn parse_broker(url: &str) -> Result<(String, u16)> {
     let rest = url
         .strip_prefix("mqtt://")
         .or_else(|| url.strip_prefix("tcp://"))

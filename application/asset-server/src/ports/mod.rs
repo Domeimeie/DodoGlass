@@ -3,9 +3,13 @@
 //!
 //! - [`upload_events`]: the stream of upload events (MQTT in production);
 //! - [`storage`]: the `ingest`, `final` and `assets` buckets (`object_store`);
-//! - [`clock`]: the current time.
+//! - [`clock`]: the current time;
+//! - [`status_hints`]: the transcoder's status messages (MQTT in production,
+//!   [`mqtt_status`]).
 
 pub mod clock;
 pub mod mqtt;
+pub mod mqtt_status;
+pub mod status_hints;
 pub mod storage;
 pub mod upload_events;
