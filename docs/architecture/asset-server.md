@@ -151,7 +151,8 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   before its first lookup is still looked up (its metadata row is created as due).
 - **Database:** SQLite via Diesel, migrations in portable SQL run at startup. Tables so far: `movie`
   (with `folder_name`/`folder_year`, the placement identity, apart from the displayed `name`/`year`)
-  and `media_file`; `show` (same folder identity), `season`, `episode`, and `media_file.episode_id`;
+  and `media_file`; `show` (same folder identity), `season`, `episode`, and `media_file.episode_id`
+  (a `CHECK` keeps a Media file from having both a `movie_id` and an `episode_id`);
   `movie_metadata` (match state, retry backoff, TMDB fields, `locked_fields` as a JSON array of field
   names; no row = not looked up yet) and `movie_candidate`; `show_metadata` and `show_candidate`
   (the same for Shows), `season_metadata` and `episode_metadata` (`matched`, `not_found` or
