@@ -1,0 +1,29 @@
+[package]
+name = "asset-server"
+version = "0.1.0"
+edition = "2024"
+description = "DodoGlass asset server: the catalogue of Movies and Shows and their Media files"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = "0.8"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+diesel = { version = "2.4", features = ["sqlite", "returning_clauses_for_sqlite_3_35"] }
+diesel_migrations = { version = "2.4", features = ["sqlite"] }
+dodoglass-ids = { path = "../dodoglass-ids" }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+# Only to switch on `bundled`: there is no system libsqlite3 to link against.
+libsqlite3-sys = { version = "0.40", features = ["bundled"] }
+object_store = { version = "0.14.2", default-features = false, features = ["aws"] }
+percent-encoding = "2.3.2"
+rumqttc = "0.25.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "signal", "macros", "time", "net"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+http-body-util = "0.1.5"
+tower = { version = "0.5", features = ["util"] }
