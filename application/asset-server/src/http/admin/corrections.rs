@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 
 use crate::catalogue::{Catalogue, Edited, Entry};
 use crate::http::{ApiError, ApiState};
-use crate::matcher::{Corrected, Matcher};
+use crate::matcher::{Corrected, CorrectionFailed, Matcher};
 
 const MOVIE: &str = "/movies/{movie}";
 const SHOW: &str = "/shows/{show}";
@@ -43,21 +43,17 @@ pub fn routes() -> Router<ApiState> {
 
 /// A [`Corrected`] as an answer: 204, or as [`failure`].
 fn answer(corrected: Corrected) -> Result<StatusCode, ApiError> {
-    match corrected {
-        Corrected::Done => Ok(StatusCode::NO_CONTENT),
-        other => Err(failure(other)),
-    }
+    corrected.map(|()| StatusCode::NO_CONTENT).map_err(failure)
 }
 
-/// A [`Corrected`] that is not done as an error: 404, 409, 400 (TMDB
-/// refused) or 503 (TMDB unavailable).
-pub(super) fn failure(corrected: Corrected) -> ApiError {
-    match corrected {
-        Corrected::Done => anyhow::anyhow!("a correction that was done is no failure").into(),
-        Corrected::NotFound(message) => ApiError::not_found(message),
-        Corrected::Refused(message) => ApiError::conflict(message),
-        Corrected::Rejected(message) => ApiError::bad_request(message),
-        Corrected::Unavailable(message) => ApiError::unavailable(message),
+/// Why a correction was not done, as an error: 404, 409, 400 (TMDB refused)
+/// or 503 (TMDB unavailable).
+pub(super) fn failure(failed: CorrectionFailed) -> ApiError {
+    match failed {
+        CorrectionFailed::NotFound(message) => ApiError::not_found(message),
+        CorrectionFailed::Refused(message) => ApiError::conflict(message),
+        CorrectionFailed::Rejected(message) => ApiError::bad_request(message),
+        CorrectionFailed::Unavailable(message) => ApiError::unavailable(message),
     }
 }
 

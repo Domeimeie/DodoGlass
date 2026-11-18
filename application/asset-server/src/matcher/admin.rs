@@ -25,10 +25,12 @@ pub enum AttachNew {
     },
 }
 
-/// What came of an admin's lookup.
+/// What came of an admin's lookup: done, or why not.
+pub type Corrected = std::result::Result<(), CorrectionFailed>;
+
+/// Why an admin's lookup was not done.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Corrected {
-    Done,
+pub enum CorrectionFailed {
     /// No such entry (or Unassigned media file); the message says which.
     NotFound(String),
     /// The entry cannot be looked up as asked; the message says why.
@@ -39,11 +41,11 @@ pub enum Corrected {
     Unavailable(String),
 }
 
-impl From<LookupError> for Corrected {
+impl From<LookupError> for CorrectionFailed {
     fn from(e: LookupError) -> Self {
         match e {
-            LookupError::Retry(e) => Corrected::Unavailable(e),
-            LookupError::Review(e) => Corrected::Rejected(e),
+            LookupError::Retry(e) => CorrectionFailed::Unavailable(e),
+            LookupError::Review(e) => CorrectionFailed::Rejected(e),
         }
     }
 }
@@ -53,14 +55,14 @@ impl Matcher {
     /// that is not locked is refilled, and it leaves Needs review.
     pub async fn pick_movie_match(&self, movie_id: i32, tmdb_id: i64) -> Result<Corrected> {
         let Some(movie) = self.catalogue.movie_lookup(movie_id).await? else {
-            return Ok(Corrected::NotFound("no such movie".into()));
+            return Ok(Err(CorrectionFailed::NotFound("no such movie".into())));
         };
         let found = match self.fetch_movie(tmdb_id, Some(movie.lookup.year)).await {
             Ok(found) => found,
-            Err(e) => return Ok(e.into()),
+            Err(e) => return Ok(Err(e.into())),
         };
         self.catalogue.movie_matched(movie_id, found).await?;
-        Ok(Corrected::Done)
+        Ok(Ok(()))
     }
 
     /// Fetches Movie `movie_id` from TMDB again: by its Match when it has
@@ -68,13 +70,13 @@ impl Matcher {
     /// Match, stay in Needs review or be retried). Locked fields are kept.
     pub async fn refresh_movie(&self, movie_id: i32) -> Result<Corrected> {
         let Some(movie) = self.catalogue.movie_lookup(movie_id).await? else {
-            return Ok(Corrected::NotFound("no such movie".into()));
+            return Ok(Err(CorrectionFailed::NotFound("no such movie".into())));
         };
         match movie.tmdb_id {
             Some(tmdb_id) => self.pick_movie_match(movie_id, tmdb_id).await,
             None => {
                 self.look_up(movie.lookup).await?;
-                Ok(Corrected::Done)
+                Ok(Ok(()))
             }
         }
     }
@@ -83,29 +85,29 @@ impl Matcher {
     /// Movie; its Seasons and Episodes are then looked up again by number.
     pub async fn pick_show_match(&self, show_id: i32, tmdb_id: i64) -> Result<Corrected> {
         let Some(show) = self.catalogue.show_lookup(show_id).await? else {
-            return Ok(Corrected::NotFound("no such show".into()));
+            return Ok(Err(CorrectionFailed::NotFound("no such show".into())));
         };
         let found = match self.fetch_show(tmdb_id, Some(show.lookup.year)).await {
             Ok(found) => found,
-            Err(e) => return Ok(e.into()),
+            Err(e) => return Ok(Err(e.into())),
         };
         self.catalogue.show_matched(show_id, found).await?;
         self.look_up_parts_of(show_id).await?;
-        Ok(Corrected::Done)
+        Ok(Ok(()))
     }
 
     /// Fetches Show `show_id` from TMDB again, as for a Movie, with its
     /// Seasons and Episodes.
     pub async fn refresh_show(&self, show_id: i32) -> Result<Corrected> {
         let Some(show) = self.catalogue.show_lookup(show_id).await? else {
-            return Ok(Corrected::NotFound("no such show".into()));
+            return Ok(Err(CorrectionFailed::NotFound("no such show".into())));
         };
         match show.tmdb_id {
             Some(tmdb_id) => self.pick_show_match(show_id, tmdb_id).await,
             None => {
                 self.look_up_show(show.lookup).await?;
                 self.look_up_parts_of(show_id).await?;
-                Ok(Corrected::Done)
+                Ok(Ok(()))
             }
         }
     }
@@ -114,7 +116,11 @@ impl Matcher {
     /// of a new Show, created from TMDB (with that as its Match). The Show's
     /// Seasons and Episodes are looked up by number at once. `Err` when TMDB
     /// refuses or is unavailable: nothing is created or attached then.
-    pub async fn attach_new(&self, id: &str, to: AttachNew) -> Result<Result<Attached, Corrected>> {
+    pub async fn attach_new(
+        &self,
+        id: &str,
+        to: AttachNew,
+    ) -> Result<Result<Attached, CorrectionFailed>> {
         if !self.catalogue.is_unassigned_media_file(id).await? {
             return Ok(Ok(Attached::NoSuchMediaFile));
         }
@@ -153,12 +159,12 @@ impl Matcher {
         match self.catalogue.look_up_part_again(entry).await? {
             PartRefresh::Due { show_id } => {
                 self.look_up_parts_of(show_id).await?;
-                Ok(Corrected::Done)
+                Ok(Ok(()))
             }
-            PartRefresh::NotFound => Ok(Corrected::NotFound("no such entry".into())),
-            PartRefresh::ShowNotMatched => Ok(Corrected::Refused(
+            PartRefresh::NotFound => Ok(Err(CorrectionFailed::NotFound("no such entry".into()))),
+            PartRefresh::ShowNotMatched => Ok(Err(CorrectionFailed::Refused(
                 "its Show has no Match: pick one first".into(),
-            )),
+            ))),
         }
     }
 
