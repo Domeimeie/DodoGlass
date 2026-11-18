@@ -4,9 +4,9 @@
 use anyhow::Result;
 use diesel::prelude::*;
 
-use super::Catalogue;
 use super::media_files::{self, READY};
 use super::schema::{episode, media_file, movie, season, show};
+use super::{Catalogue, shows};
 use crate::ports::storage::delete_output;
 
 /// The outcome of an admin change.
@@ -52,14 +52,6 @@ fn scope_of(conn: &mut SqliteConnection, entry: Entry) -> Result<Option<Scope>> 
             .select(episode::id)
             .load(conn)?)
     };
-    let season_of = |conn: &mut SqliteConnection, show: i32, number: i32| -> Result<Option<i32>> {
-        Ok(season::table
-            .filter(season::show_id.eq(show))
-            .filter(season::number.eq(number))
-            .select(season::id)
-            .first(conn)
-            .optional()?)
-    };
     Ok(match entry {
         Entry::Movie(id) => {
             let found: Option<i32> = movie::table
@@ -95,7 +87,7 @@ fn scope_of(conn: &mut SqliteConnection, entry: Entry) -> Result<Option<Scope>> 
                 }
             }
         }
-        Entry::Season { show, number } => match season_of(conn, show, number)? {
+        Entry::Season { show, number } => match shows::season_id(conn, show, number)? {
             None => None,
             Some(id) => Some(Scope {
                 episodes: episodes_of(conn, &[id])?,
@@ -107,21 +99,10 @@ fn scope_of(conn: &mut SqliteConnection, entry: Entry) -> Result<Option<Scope>> 
             show,
             season,
             number,
-        } => {
-            let found: Option<i32> = match season_of(conn, show, season)? {
-                None => None,
-                Some(season) => episode::table
-                    .filter(episode::season_id.eq(season))
-                    .filter(episode::number.eq(number))
-                    .select(episode::id)
-                    .first(conn)
-                    .optional()?,
-            };
-            found.map(|id| Scope {
-                episodes: vec![id],
-                ..Scope::default()
-            })
-        }
+        } => shows::episode_id(conn, show, season, number)?.map(|id| Scope {
+            episodes: vec![id],
+            ..Scope::default()
+        }),
     })
 }
 

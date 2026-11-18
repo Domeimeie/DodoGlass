@@ -168,6 +168,38 @@ pub(super) fn find(conn: &mut SqliteConnection, place: EpisodePlace) -> Result<O
         .optional()?)
 }
 
+/// The id of Season `number` of Show `show`, if it exists.
+pub(super) fn season_id(
+    conn: &mut SqliteConnection,
+    show: i32,
+    number: i32,
+) -> Result<Option<i32>> {
+    Ok(season::table
+        .filter(season::show_id.eq(show))
+        .filter(season::number.eq(number))
+        .select(season::id)
+        .first(conn)
+        .optional()?)
+}
+
+/// The id of Episode `number` of Season `season` of Show `show`, if it exists.
+pub(super) fn episode_id(
+    conn: &mut SqliteConnection,
+    show: i32,
+    season: i32,
+    number: i32,
+) -> Result<Option<i32>> {
+    let Some(season) = season_id(conn, show, season)? else {
+        return Ok(None);
+    };
+    Ok(episode::table
+        .filter(episode::season_id.eq(season))
+        .filter(episode::number.eq(number))
+        .select(episode::id)
+        .first(conn)
+        .optional()?)
+}
+
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = media_file)]
 struct ReadyMediaFileRow {

@@ -11,14 +11,14 @@ use anyhow::Result;
 use diesel::prelude::*;
 use serde_json::{Map, Value};
 
-use super::Catalogue;
 use super::admin::Entry;
 use super::match_state::MatchState;
 use super::metadata::{LOCKABLE_FIELDS, LockedFields, LookupDue};
 use super::schema::{
-    episode, episode_metadata, movie, movie_metadata, season, season_metadata, show, show_metadata,
+    episode_metadata, movie, movie_metadata, season_metadata, show, show_metadata,
 };
 use super::show_metadata::{EPISODE_LOCKABLE_FIELDS, SEASON_LOCKABLE_FIELDS, SHOW_LOCKABLE_FIELDS};
+use super::{Catalogue, shows};
 
 /// A `retry_at_ms` that is always due: looked up by the next pass.
 const DUE: Option<i64> = Some(0);
@@ -89,16 +89,6 @@ impl Target {
     }
 }
 
-/// The id of Season `number` of Show `show`.
-fn season_id(conn: &mut SqliteConnection, show: i32, number: i32) -> Result<Option<i32>> {
-    Ok(season::table
-        .filter(season::show_id.eq(show))
-        .filter(season::number.eq(number))
-        .select(season::id)
-        .first(conn)
-        .optional()?)
-}
-
 fn resolve(conn: &mut SqliteConnection, entry: Entry) -> Result<Option<Target>> {
     Ok(match entry {
         Entry::Movie(id) => movie::table
@@ -113,21 +103,12 @@ fn resolve(conn: &mut SqliteConnection, entry: Entry) -> Result<Option<Target>> 
             .first(conn)
             .optional()?
             .map(Target::Show),
-        Entry::Season { show, number } => season_id(conn, show, number)?.map(Target::Season),
+        Entry::Season { show, number } => shows::season_id(conn, show, number)?.map(Target::Season),
         Entry::Episode {
             show,
             season,
             number,
-        } => match season_id(conn, show, season)? {
-            None => None,
-            Some(season) => episode::table
-                .filter(episode::season_id.eq(season))
-                .filter(episode::number.eq(number))
-                .select(episode::id)
-                .first(conn)
-                .optional()?
-                .map(Target::Episode),
-        },
+        } => shows::episode_id(conn, show, season, number)?.map(Target::Episode),
     })
 }
 
