@@ -6,13 +6,15 @@
 //!   from its path (ADR 0003);
 //! - [`media_files`]: Media file states (Processing, Ready, ...);
 //! - [`movies`]: Movies, and what viewers see of them;
-//! - [`shows`]: Shows, Seasons and Episodes, and what viewers see of them.
+//! - [`shows`]: Shows, Seasons and Episodes, and what viewers see of them;
+//! - [`unassigned`]: Unassigned media files, and attaching them.
 
 mod media_files;
 mod movies;
 mod placement;
 pub(crate) mod schema;
 mod shows;
+mod unassigned;
 
 use std::sync::Arc;
 
@@ -22,6 +24,7 @@ use crate::ports::clock::Clock;
 pub use media_files::Manifests;
 pub use movies::{MediaFileView, MovieView};
 pub use shows::{EpisodeView, SeasonView, ShowView};
+pub use unassigned::UnassignedView;
 
 #[derive(Clone)]
 pub struct Catalogue {
