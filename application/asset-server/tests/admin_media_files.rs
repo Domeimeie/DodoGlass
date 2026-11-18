@@ -170,3 +170,62 @@ async fn the_default_of_an_episode_hands_over_too() {
         .await;
     assert_eq!(default_of(&episodes[0]).as_deref(), Some("S01E01 hd"));
 }
+
+// --- Labels -----------------------------------------------------------------
+
+async fn rename(app: &TestApp, key: &str, label: &str) -> axum::http::StatusCode {
+    app.send_json("PATCH", &uri(key), json!({ "label": label }))
+        .await
+        .0
+}
+
+#[tokio::test]
+async fn an_admin_renames_a_label() {
+    let app = TestApp::start().await;
+    upload_ready(&app, MATRIX).await;
+    upload_ready(&app, DIRECTORS_CUT).await;
+
+    let status = rename(&app, DIRECTORS_CUT, "Director's Cut").await;
+
+    assert_eq!(status, 204);
+    assert_eq!(labels(&app).await, vec!["Director's Cut", "matrix"]);
+}
+
+#[tokio::test]
+async fn renaming_to_a_label_taken_in_the_same_movie_is_refused() {
+    let app = TestApp::start().await;
+    upload_ready(&app, MATRIX).await;
+    upload_ready(&app, DIRECTORS_CUT).await;
+
+    let status = rename(&app, DIRECTORS_CUT, "matrix").await;
+
+    assert_eq!(status, 409);
+    assert_eq!(labels(&app).await, vec!["matrix", "matrix-directors-cut"]);
+}
+
+#[tokio::test]
+async fn a_label_taken_in_another_movie_is_free() {
+    let app = TestApp::start().await;
+    upload_ready(&app, MATRIX).await;
+    upload_ready(&app, "movies/Heat (1995)/heat.mkv").await;
+
+    let status = rename(&app, MATRIX, "heat").await;
+
+    assert_eq!(status, 204);
+}
+
+#[tokio::test]
+async fn an_empty_label_is_refused() {
+    let app = TestApp::start().await;
+    upload_ready(&app, MATRIX).await;
+
+    assert_eq!(rename(&app, MATRIX, "  ").await, 400);
+    assert_eq!(labels(&app).await, vec!["matrix"]);
+}
+
+#[tokio::test]
+async fn renaming_an_unknown_media_file_is_not_found() {
+    let app = TestApp::start().await;
+
+    assert_eq!(rename(&app, MATRIX, "matrix").await, 404);
+}
