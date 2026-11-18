@@ -198,6 +198,11 @@ impl TestApp {
     }
 }
 
+/// The fixture exactly as RustFS sent it (an upload of `sample.mp4`).
+pub fn rustfs_event() -> Vec<u8> {
+    RUSTFS_EVENT.as_bytes().to_vec()
+}
+
 /// RustFS's event for uploads of `keys` to `ingest`, one record per key, with
 /// the keys form-encoded the way S3 events carry them.
 pub fn s3_event(keys: &[&str]) -> Vec<u8> {
