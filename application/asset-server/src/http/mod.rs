@@ -5,6 +5,7 @@
 mod error;
 mod media_files;
 mod movies;
+mod shows;
 
 use axum::Router;
 
@@ -15,6 +16,7 @@ pub use error::ApiError;
 pub fn router(catalogue: Catalogue) -> Router {
     Router::new()
         .merge(movies::routes())
+        .merge(shows::routes())
         .merge(media_files::routes())
         .with_state(catalogue)
 }

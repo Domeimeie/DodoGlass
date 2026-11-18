@@ -5,7 +5,6 @@
 
 use anyhow::Result;
 use diesel::prelude::*;
-use diesel::upsert::excluded;
 use serde::Serialize;
 
 use super::Catalogue;
@@ -75,37 +74,103 @@ pub struct Manifests {
     pub dash: Option<String>,
 }
 
+/// What a Media file belongs to. Labels are unique, and there is one Default
+/// media file, per owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Owner {
+    Movie(i32),
+    Episode(i32),
+}
+
 /// Creates the Media file `id` as Processing, or makes an existing one
-/// Processing again (a new version of the same upload).
+/// Processing again (a new version of the same upload: its owner, Label and
+/// default flag stay).
+///
+/// A new Media file of `owner` is labelled `stem`, made unique within the
+/// owner (see [`unique_label`]); the first one of an owner is its Default
+/// media file. Run it inside the transaction that found the owner.
 pub(super) fn processing(
     conn: &mut SqliteConnection,
     id: &str,
     key: &str,
-    movie: Option<i32>,
-    label: &str,
+    owner: Option<Owner>,
+    stem: &str,
     now: i64,
 ) -> Result<()> {
-    diesel::insert_into(media_file::table)
-        .values((
-            media_file::id.eq(id),
-            media_file::source_key.eq(key),
-            media_file::movie_id.eq(movie),
-            media_file::label.eq(label),
+    let updated = diesel::update(media_file::table.find(id))
+        .set((
             media_file::state.eq(PROCESSING),
             media_file::state_since_ms.eq(now),
-            media_file::created_ms.eq(now),
-        ))
-        .on_conflict(media_file::id)
-        .do_update()
-        .set((
-            media_file::state.eq(excluded(media_file::state)),
-            media_file::state_since_ms.eq(excluded(media_file::state_since_ms)),
             media_file::hls_manifest.eq(None::<String>),
             media_file::dash_manifest.eq(None::<String>),
             media_file::error.eq(None::<String>),
         ))
         .execute(conn)?;
+    if updated > 0 {
+        return Ok(());
+    }
+    let (label, is_default) = match owner {
+        Some(owner) => {
+            let taken = labels_of(conn, owner)?;
+            (unique_label(stem, extension(key), &taken), taken.is_empty())
+        }
+        None => (stem.to_string(), false),
+    };
+    let (movie, episode) = match owner {
+        Some(Owner::Movie(movie)) => (Some(movie), None),
+        Some(Owner::Episode(episode)) => (None, Some(episode)),
+        None => (None, None),
+    };
+    diesel::insert_into(media_file::table)
+        .values((
+            media_file::id.eq(id),
+            media_file::source_key.eq(key),
+            media_file::movie_id.eq(movie),
+            media_file::episode_id.eq(episode),
+            media_file::label.eq(label),
+            media_file::is_default.eq(is_default),
+            media_file::state.eq(PROCESSING),
+            media_file::state_since_ms.eq(now),
+            media_file::created_ms.eq(now),
+        ))
+        .execute(conn)?;
     Ok(())
+}
+
+/// The Labels of every Media file of `owner`, whatever its state.
+fn labels_of(conn: &mut SqliteConnection, owner: Owner) -> Result<Vec<String>> {
+    let query = media_file::table.select(media_file::label);
+    Ok(match owner {
+        Owner::Movie(movie) => query.filter(media_file::movie_id.eq(movie)).load(conn)?,
+        Owner::Episode(episode) => query
+            .filter(media_file::episode_id.eq(episode))
+            .load(conn)?,
+    })
+}
+
+/// `stem` if no other Media file of the owner has it, else `stem (ext)`
+/// (`matrix.mkv` + `matrix.mp4` → "matrix", "matrix (mp4)"), with a number
+/// added if that is taken too.
+fn unique_label(stem: &str, ext: &str, taken: &[String]) -> String {
+    let free = |label: &String| !taken.contains(label);
+    let mut candidates = std::iter::once(stem.to_string())
+        .chain((!ext.is_empty()).then(|| format!("{stem} ({ext})")))
+        .chain((2..).map(|n| match ext {
+            "" => format!("{stem} ({n})"),
+            ext => format!("{stem} ({ext} {n})"),
+        }));
+    candidates
+        .find(free)
+        .expect("the numbered candidates never end")
+}
+
+/// `movies/The Matrix (1999)/matrix.mkv` → `mkv`; empty without one.
+fn extension(key: &str) -> &str {
+    let name = key.rsplit('/').next().unwrap_or(key);
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => ext,
+        _ => "",
+    }
 }
 
 impl Catalogue {

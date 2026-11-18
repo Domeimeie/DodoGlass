@@ -234,6 +234,7 @@ async fn an_output_marker_with_no_known_media_file_is_placed_as_ready() {
             "media_files": [{
                 "id": MATRIX_ID,
                 "label": "matrix",
+                "default": true,
                 "manifests": {
                     "hls": format!("final/{MATRIX_ID}/hls/master.m3u8"),
                     "dash": format!("final/{MATRIX_ID}/dash/manifest.mpd"),
@@ -241,6 +242,17 @@ async fn an_output_marker_with_no_known_media_file_is_placed_as_ready() {
             }],
         }])
     );
+}
+
+#[tokio::test]
+async fn an_unseen_episode_output_is_placed_in_its_show() {
+    let app = TestApp::start().await;
+
+    app.finish_transcode("shows/Breaking Bad (2008)/Season 01/S01E02.mkv")
+        .await;
+    app.reconcile().await;
+
+    assert_eq!(app.get_json("/shows").await[0]["name"], "Breaking Bad");
 }
 
 #[tokio::test]

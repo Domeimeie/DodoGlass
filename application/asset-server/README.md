@@ -1,8 +1,8 @@
 # DodoGlass Asset server
 
-The catalogue of Movies and their Media files. It listens for uploads to the `ingest` bucket, places
-each one in the catalogue from its path (ADR 0003), and marks it Ready once the transcoder's output
-marker appears in `final` (ADR 0001). The HTTP API serves the catalogue.
+The catalogue of Movies, Shows (Seasons, Episodes) and their Media files. It listens for uploads to
+the `ingest` bucket, places each one in the catalogue from its path (ADR 0003), and marks it Ready
+once the transcoder's output marker appears in `final` (ADR 0001). The HTTP API serves the catalogue.
 
 Design: [Asset server architecture page](../../docs/architecture/asset-server.md). Terms:
 `GLOSSARY.md` at the repository root.
@@ -33,12 +33,12 @@ Other tasks (from this folder): `go-task test`, `go-task lint`, `go-task fmt`, `
 
 | Module | What it does |
 |---|---|
-| `catalogue/` | The core: placing uploads (`placement.rs`), Media file states (`media_files.rs`), Movies and what viewers see (`movies.rs`). Everything else goes through it |
+| `catalogue/` | The core: placing uploads (`placement.rs`), Media file states, Labels and the Default media file per owner (`media_files.rs`), Movies and what viewers see (`movies.rs`), Shows, Seasons and Episodes (`shows.rs`). Everything else goes through it |
 | `ports/` | Upload events (`upload_events.rs`, MQTT in `mqtt.rs`), status hints (`status_hints.rs`, MQTT in `mqtt_status.rs`), buckets (`storage.rs`), the clock (`clock.rs`) |
 | `ingest/` | The ingest listener: S3 events → `Catalogue::upload_seen`, ack after storing |
 | `reconcile.rs` | Output markers in `final` → Ready, Missing, Failed after 24 h; unseen outputs placed from their marker |
 | `status.rs` | The status listener: `completed` → early reconcile of that Media file, `failed` → Failed |
-| `http/` | axum routes, one module per part of the API (`movies.rs`, `media_files.rs`), merged in `mod.rs` |
+| `http/` | axum routes, one module per part of the API (`movies.rs`, `shows.rs`, `media_files.rs`), merged in `mod.rs` |
 | `app.rs` | Builds everything; used by `main.rs` and by the tests |
 | `db.rs`, `migrations/` | SQLite connection, portable-SQL migrations (ADR 0002) |
 
@@ -85,5 +85,5 @@ rely on it being stored. Each `TestApp` has its own in-memory SQLite database wi
 migrations, so tests run in parallel. A new port (e.g. a TMDB fake) goes into `tests/common/mod.rs`
 and is passed to `App::start` next to the buckets and the clock.
 
-Put scenarios in a file per topic (`tests/movies.rs`, `tests/shows.rs`, ...), each starting with
+Put scenarios in a file per topic (`tests/movies.rs`, `tests/media_files.rs`, `tests/shows.rs`, ...), each starting with
 `mod common;`.
