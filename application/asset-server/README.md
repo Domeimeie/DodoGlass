@@ -18,7 +18,8 @@ go-task infra:up                    # RustFS + Mosquitto, buckets ingest, final 
 go-task transcoder:serve-s3         # in a second terminal
 go-task asset-server:serve          # in a third terminal; HTTP API on 127.0.0.1:8090
 go-task infra:upload KEY="movies/The Matrix (1999)/matrix.mkv" -- application/transcoder/sample.mp4
-curl -s localhost:8090/movies       # listed after the next reconcile (every 300 s, --reconcile-interval)
+curl -s localhost:8090/movies       # listed once the transcoder's `completed` status arrives
+                                    # (or after the next reconcile: every 300 s, --reconcile-interval)
 ```
 
 `go-task asset-server:serve -- --help` lists every setting. Each one can also be set with an
@@ -33,10 +34,11 @@ Other tasks (from this folder): `go-task test`, `go-task lint`, `go-task fmt`, `
 | Module | What it does |
 |---|---|
 | `catalogue/` | The core: placing uploads (`placement.rs`), Media file states (`media_files.rs`), Movies and what viewers see (`movies.rs`). Everything else goes through it |
-| `ports/` | Upload events (`upload_events.rs`, MQTT in `mqtt.rs`), buckets (`storage.rs`), the clock (`clock.rs`) |
+| `ports/` | Upload events (`upload_events.rs`, MQTT in `mqtt.rs`), status hints (`status_hints.rs`, MQTT in `mqtt_status.rs`), buckets (`storage.rs`), the clock (`clock.rs`) |
 | `ingest/` | The ingest listener: S3 events → `Catalogue::upload_seen`, ack after storing |
-| `reconcile.rs` | Output markers in `final` → Ready |
-| `http/` | axum routes, one module per part of the API (`movies.rs`), merged in `mod.rs` |
+| `reconcile.rs` | Output markers in `final` → Ready, Missing, Failed after 24 h; unseen outputs placed from their marker |
+| `status.rs` | The status listener: `completed` → early reconcile of that Media file, `failed` → Failed |
+| `http/` | axum routes, one module per part of the API (`movies.rs`, `media_files.rs`), merged in `mod.rs` |
 | `app.rs` | Builds everything; used by `main.rs` and by the tests |
 | `db.rs`, `migrations/` | SQLite connection, portable-SQL migrations (ADR 0002) |
 
@@ -69,7 +71,10 @@ What `TestApp` offers:
   `send_event(payload)` with `common::s3_event(&[keys])` (several records) or
   `common::rustfs_event()` (the fixture as is), `finish_transcode(key)`, `put(&app.buckets.final_, key,
   bytes)` for anything else in a bucket (`buckets.ingest`, `buckets.final_`, `buckets.assets` are
-  `object_store` in memory).
+  `object_store` in memory), `delete_prefix(&bucket, prefix)` to make output disappear.
+- **Status hints:** `send_completed(key)`, `fail_transcode(key, error)`, or any
+  `send_status(json)` (e.g. `common::status_message(key, event, error)`); each returns once the status
+  listener has handled it.
 - **Triggers:** `reconcile()`, `restart()` (same database and buckets, so the startup reconcile runs:
   "the asset server was down"), `advance(duration)` to move the fake clock.
 - **HTTP:** `get(uri)` → `(status, json)`, `get_json(uri)` (asserts 200), `send_json(method, uri,
