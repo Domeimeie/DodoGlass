@@ -39,17 +39,32 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   owner), so Movies and Episodes follow the same rules.
 - **Reconciler:** a Processing Media file becomes **Ready** when `final/<id>/source.json` exists, at
   startup and every `--reconcile-interval` seconds (default 300). Its manifest keys follow the
-  `formats` in the marker.
+  `formats` in the marker. Each pass also checks the other states:
+  - a Ready Media file whose marker is gone becomes **Missing**, and Ready again when it is back;
+    it is never deleted automatically;
+  - a Media file Processing for more than 24 h whose input is still in `ingest` becomes **Failed**
+    (the transcoder deletes the input once done, so a gone input is not a failure);
+  - a Failed or Missing one whose marker is there becomes Ready (the marker is the source of truth,
+    ADR 0001; e.g. a task redelivered to another worker that finished it);
+  - a folder in `final` with no Media file is placed from the `input.key` of its marker, as Ready,
+    if that key gives the folder's id.
+- **Status hints:** the asset server subscribes to `dodoglass/status` (`--mqtt-status-topic`, its
+  own connection, client id `<id>-status`). `completed` reconciles that one Media file at once;
+  `failed` makes a Processing Media file **Failed** with the message's `error`. Other events are
+  ignored. Losing every hint only delays Ready until the next reconcile.
+- **Retry:** uploading to the same path again makes a Failed (or Ready) Media file Processing.
 - **Read API:** `GET /movies` lists the Movies that are not Hidden, with their Ready Media files:
   `[{"name", "year", "media_files": [{"id", "label", "default", "manifests": {"hls", "dash"}}]}]`,
   the Media files ordered by Label.
   `GET /shows` → `[{"id", "name", "year"}]`, `GET /shows/{id}/seasons` → `[{"number"}]`,
   `GET /shows/{id}/seasons/{number}/episodes` → `[{"number", "media_files": [...]}]` (Media files as
   for Movies). Hidden applies at every level: an Episode needs a Ready Media file, a Season a listed
-  Episode, a Show a listed Season; a Hidden or unknown Show or Season answers 404.
+  Episode, a Show a listed Season; a Hidden or unknown Show or Season answers 404. Processing,
+  Failed and Missing Media files are not listed.
 - **Unassigned media files:** an upload outside the layout is stored without a Movie or Episode,
-  goes through Processing and Ready like any other, and is never in the read API.
+  goes through Processing and Ready (or Failed) like any other, and is never in the read API.
 - **Admin API** (under `/admin`, no authentication, localhost only):
+  `GET /admin/media-files/<id>` → `{"id", "state", "error"}`, for any state, 404 for an unknown id.
   `GET /admin/unassigned-media-files` → `[{"id", "path", "reason", "state"}]` by path, the reason
   taken from the path (`no_year`, `unknown_root_folder`, `wrong_depth`, `unsupported_extension`,
   `unknown_season_folder`, `no_episode_code`, `season_mismatch`).
@@ -63,8 +78,8 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   (with `folder_name`/`folder_year`, the placement identity, apart from the displayed `name`/`year`)
   and `media_file`; `show` (same folder identity), `season`, `episode`, and `media_file.episode_id`.
 
-Not built yet: Failed and Missing, a new default when the default goes away, status hints,
-TMDB, images and the rest of the admin API.
+Not built yet: a new default when the default goes away, TMDB, images and the rest of the admin
+API (including listing Failed and Missing Media files).
 
 **Running it:** `go-task infra:up`, `go-task transcoder:serve-s3`, `go-task asset-server:serve`
 (HTTP on `127.0.0.1:8090`), then for example
@@ -140,6 +155,7 @@ stateDiagram-v2
     Processing --> Ready: source.json found
     Processing --> Failed: failed status, or > 24 h with input still in ingest
     Failed --> Processing: upload to the same path again
+    Failed --> Ready: source.json found
     Ready --> Processing: upload to the same path again (new version)
     Ready --> Missing: output gone from final
     Missing --> Ready: output back

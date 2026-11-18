@@ -4,6 +4,7 @@
 //! - [`ports`]: upload events, object storage and the clock, replaceable in tests;
 //! - [`ingest`]: the ingest listener (upload events → Catalogue);
 //! - [`reconcile`]: the reconciler (output markers in `final` → Ready);
+//! - [`status`]: the status listener (status hints → early reconcile, Failed);
 //! - [`http`]: the HTTP API;
 //! - [`app`]: puts them together, for `main` and for the tests.
 
@@ -14,3 +15,4 @@ pub mod http;
 pub mod ingest;
 pub mod ports;
 pub mod reconcile;
+pub mod status;

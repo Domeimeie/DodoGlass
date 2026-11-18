@@ -4,7 +4,7 @@
 //!
 //! - [`placement`]: an upload seen in `ingest` becomes a Media file, placed
 //!   from its path (ADR 0003);
-//! - [`media_files`]: Media file states (Processing, Ready, ...);
+//! - [`media_files`]: Media file states (Processing, Ready, Failed, Missing);
 //! - [`movies`]: Movies, and what viewers see of them;
 //! - [`shows`]: Shows, Seasons and Episodes, and what viewers see of them;
 //! - [`unassigned`]: Unassigned media files, and attaching them.
@@ -21,7 +21,9 @@ use std::sync::Arc;
 use crate::db::Db;
 use crate::ports::clock::Clock;
 
-pub use media_files::Manifests;
+pub use media_files::{
+    Manifests, MediaFileState, MediaFileStatus, PROCESSING_TIMEOUT_MS, TIMED_OUT, TrackedMediaFile,
+};
 pub use movies::{MediaFileView, MovieView};
 pub use shows::{EpisodeView, SeasonView, ShowView};
 pub use unassigned::{AttachTo, Attached, UnassignedView};
