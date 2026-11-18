@@ -251,3 +251,59 @@ async fn an_edit_of_a_field_the_entry_does_not_have_is_refused() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(only_movie(&app).await["name"], json!("The Matrix"));
 }
+
+#[tokio::test]
+async fn a_re_upload_keeps_locked_fields() {
+    let app = TestApp::start().await;
+    app.tmdb.add_movie(movie(603, "The Matrix", 1999));
+    ready(&app, MATRIX).await;
+    let id = only_movie(&app).await["id"].clone();
+    app.send_json(
+        "PATCH",
+        &format!("/admin/movies/{id}"),
+        json!({ "name": "Matrix", "description": "My own words." }),
+    )
+    .await;
+
+    ready(&app, MATRIX).await;
+
+    let listed = only_movie(&app).await;
+    assert_eq!(listed["name"], json!("Matrix"));
+    assert_eq!(listed["description"], json!("My own words."));
+    assert_eq!(listed["tmdb_id"], json!(603));
+}
+
+#[tokio::test]
+async fn a_movie_whose_last_media_file_was_removed_comes_back_with_its_locked_fields() {
+    let app = TestApp::start().await;
+    app.tmdb.add_movie(movie(603, "The Matrix", 1999));
+    ready(&app, MATRIX).await;
+    let listed = only_movie(&app).await;
+    let id = &listed["id"];
+    app.send_json(
+        "PATCH",
+        &format!("/admin/movies/{id}"),
+        json!({ "name": "Matrix", "description": "My own words." }),
+    )
+    .await;
+    let file = listed["media_files"][0]["id"].as_str().unwrap();
+    let (status, _) = app
+        .request(
+            Request::delete(format!("/admin/media-files/{file}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(app.get_json("/movies").await, json!([]));
+
+    ready(&app, MATRIX).await;
+    app.send_json("POST", &format!("/admin/movies/{id}/refresh"), json!({}))
+        .await;
+
+    let listed = only_movie(&app).await;
+    assert_eq!(&listed["id"], id);
+    assert_eq!(listed["name"], json!("Matrix"));
+    assert_eq!(listed["description"], json!("My own words."));
+    assert_eq!(listed["tmdb_id"], json!(603));
+}
