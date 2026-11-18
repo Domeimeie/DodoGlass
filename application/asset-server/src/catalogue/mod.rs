@@ -5,6 +5,7 @@
 //! - [`placement`]: an upload seen in `ingest` becomes a Media file, placed
 //!   from its path (ADR 0003);
 //! - [`media_files`]: Media file states (Processing, Ready, Failed, Missing);
+//! - [`match_state`]: where a TMDB lookup stands (Matched, Needs review, ...);
 //! - [`movies`]: Movies, and what viewers see of them;
 //! - [`shows`]: Shows, Seasons and Episodes, and what viewers see of them;
 //! - [`unassigned`]: Unassigned media files, and attaching them;
@@ -20,6 +21,7 @@
 
 mod admin;
 mod corrections;
+mod match_state;
 mod media_files;
 mod metadata;
 mod movies;

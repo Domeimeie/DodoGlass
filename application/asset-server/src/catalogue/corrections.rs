@@ -13,14 +13,13 @@ use serde_json::{Map, Value};
 
 use super::Catalogue;
 use super::admin::Entry;
+use super::match_state::MatchState;
 use super::metadata::{LOCKABLE_FIELDS, LockedFields, LookupDue};
 use super::schema::{
     episode, episode_metadata, movie, movie_metadata, season, season_metadata, show, show_metadata,
 };
 use super::show_metadata::{EPISODE_LOCKABLE_FIELDS, SEASON_LOCKABLE_FIELDS, SHOW_LOCKABLE_FIELDS};
 
-const MATCHED: &str = "matched";
-const RETRYING: &str = "retrying";
 /// A `retry_at_ms` that is always due: looked up by the next pass.
 const DUE: Option<i64> = Some(0);
 
@@ -185,7 +184,7 @@ fn ensure_metadata(conn: &mut SqliteConnection, target: Target) -> Result<()> {
         Target::Movie(id) => diesel::insert_into(movie_metadata::table)
             .values((
                 movie_metadata::movie_id.eq(id),
-                movie_metadata::match_state.eq(RETRYING),
+                movie_metadata::match_state.eq(MatchState::Retrying),
                 movie_metadata::retry_at_ms.eq(DUE),
             ))
             .on_conflict_do_nothing()
@@ -193,7 +192,7 @@ fn ensure_metadata(conn: &mut SqliteConnection, target: Target) -> Result<()> {
         Target::Show(id) => diesel::insert_into(show_metadata::table)
             .values((
                 show_metadata::show_id.eq(id),
-                show_metadata::match_state.eq(RETRYING),
+                show_metadata::match_state.eq(MatchState::Retrying),
                 show_metadata::retry_at_ms.eq(DUE),
             ))
             .on_conflict_do_nothing()
@@ -201,7 +200,7 @@ fn ensure_metadata(conn: &mut SqliteConnection, target: Target) -> Result<()> {
         Target::Season(id) => diesel::insert_into(season_metadata::table)
             .values((
                 season_metadata::season_id.eq(id),
-                season_metadata::match_state.eq(RETRYING),
+                season_metadata::match_state.eq(MatchState::Retrying),
                 season_metadata::retry_at_ms.eq(DUE),
             ))
             .on_conflict_do_nothing()
@@ -209,7 +208,7 @@ fn ensure_metadata(conn: &mut SqliteConnection, target: Target) -> Result<()> {
         Target::Episode(id) => diesel::insert_into(episode_metadata::table)
             .values((
                 episode_metadata::episode_id.eq(id),
-                episode_metadata::match_state.eq(RETRYING),
+                episode_metadata::match_state.eq(MatchState::Retrying),
                 episode_metadata::retry_at_ms.eq(DUE),
             ))
             .on_conflict_do_nothing()
@@ -352,7 +351,7 @@ impl Catalogue {
     pub async fn movie_lookup(&self, movie_id: i32) -> Result<Option<MovieLookup>> {
         self.db
             .run(move |conn| {
-                let row: Option<(String, i32, Option<String>, Option<i64>)> = movie::table
+                let row: Option<(String, i32, Option<MatchState>, Option<i64>)> = movie::table
                     .left_join(movie_metadata::table)
                     .filter(movie::id.eq(movie_id))
                     .select((
@@ -370,7 +369,7 @@ impl Catalogue {
                         year,
                         failed_attempts: 0,
                     },
-                    tmdb_id: tmdb_id.filter(|_| state.as_deref() == Some(MATCHED)),
+                    tmdb_id: tmdb_id.filter(|_| state == Some(MatchState::Matched)),
                 }))
             })
             .await
@@ -380,7 +379,7 @@ impl Catalogue {
     pub async fn show_lookup(&self, show_id: i32) -> Result<Option<ShowLookup>> {
         self.db
             .run(move |conn| {
-                let row: Option<(String, i32, Option<String>, Option<i64>)> = show::table
+                let row: Option<(String, i32, Option<MatchState>, Option<i64>)> = show::table
                     .left_join(show_metadata::table)
                     .filter(show::id.eq(show_id))
                     .select((
@@ -398,7 +397,7 @@ impl Catalogue {
                         year,
                         failed_attempts: 0,
                     },
-                    tmdb_id: tmdb_id.filter(|_| state.as_deref() == Some(MATCHED)),
+                    tmdb_id: tmdb_id.filter(|_| state == Some(MatchState::Matched)),
                 }))
             })
             .await
@@ -419,26 +418,26 @@ impl Catalogue {
                     let Some(target) = resolve(conn, entry)? else {
                         return Ok(PartRefresh::NotFound);
                     };
-                    let state: Option<String> = show_metadata::table
+                    let state: Option<MatchState> = show_metadata::table
                         .find(show_id)
                         .select(show_metadata::match_state)
                         .first(conn)
                         .optional()?;
-                    if state.as_deref() != Some(MATCHED) {
+                    if state != Some(MatchState::Matched) {
                         return Ok(PartRefresh::ShowNotMatched);
                     }
                     ensure_metadata(conn, target)?;
                     match target {
                         Target::Season(id) => diesel::update(season_metadata::table.find(id))
                             .set((
-                                season_metadata::match_state.eq(RETRYING),
+                                season_metadata::match_state.eq(MatchState::Retrying),
                                 season_metadata::lookup_attempts.eq(0),
                                 season_metadata::retry_at_ms.eq(DUE),
                             ))
                             .execute(conn)?,
                         Target::Episode(id) => diesel::update(episode_metadata::table.find(id))
                             .set((
-                                episode_metadata::match_state.eq(RETRYING),
+                                episode_metadata::match_state.eq(MatchState::Retrying),
                                 episode_metadata::lookup_attempts.eq(0),
                                 episode_metadata::retry_at_ms.eq(DUE),
                             ))

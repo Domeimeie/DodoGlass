@@ -16,15 +16,11 @@ use diesel::prelude::*;
 use serde::Serialize;
 
 use super::Catalogue;
+use super::match_state::MatchState;
 use super::metadata::{Candidate, LockedFields, LookupDue};
 use super::schema::{
     episode, episode_metadata, season, season_metadata, show, show_candidate, show_metadata,
 };
-
-const MATCHED: &str = "matched";
-const NEEDS_REVIEW: &str = "needs_review";
-const RETRYING: &str = "retrying";
-const NOT_FOUND: &str = "not_found";
 
 /// The fields an admin can lock on a Show (as stored in `locked_fields`).
 pub const SHOW_LOCKABLE_FIELDS: [&str; 5] = ["name", "year", "imdb_id", "description", "image"];
@@ -244,14 +240,14 @@ fn look_up_parts_again(conn: &mut SqliteConnection, show_id: i32, clear: bool) -
     }
     diesel::update(season_metadata::table.filter(season_metadata::season_id.eq_any(&seasons)))
         .set((
-            season_metadata::match_state.eq(RETRYING),
+            season_metadata::match_state.eq(MatchState::Retrying),
             season_metadata::lookup_attempts.eq(0),
             season_metadata::retry_at_ms.eq(Some(0i64)),
         ))
         .execute(conn)?;
     diesel::update(episode_metadata::table.filter(episode_metadata::episode_id.eq_any(&episodes)))
         .set((
-            episode_metadata::match_state.eq(RETRYING),
+            episode_metadata::match_state.eq(MatchState::Retrying),
             episode_metadata::lookup_attempts.eq(0),
             episode_metadata::retry_at_ms.eq(Some(0i64)),
         ))
@@ -301,7 +297,7 @@ pub(super) fn apply_show_match(
             .execute(conn)?;
     }
     let values = (
-        show_metadata::match_state.eq(MATCHED),
+        show_metadata::match_state.eq(MatchState::Matched),
         show_metadata::lookup_attempts.eq(0),
         show_metadata::retry_at_ms.eq(None::<i64>),
         show_metadata::tmdb_id.eq(Some(found.tmdb_id)),
@@ -332,7 +328,7 @@ impl Catalogue {
                         show_metadata::show_id
                             .is_null()
                             .or(show_metadata::match_state
-                                .eq(RETRYING)
+                                .eq(MatchState::Retrying)
                                 .and(show_metadata::retry_at_ms.le(now))),
                     )
                     .order(show::id.asc())
@@ -375,7 +371,7 @@ impl Catalogue {
             .run(move |conn| {
                 conn.transaction(|conn| {
                     let values = (
-                        show_metadata::match_state.eq(NEEDS_REVIEW),
+                        show_metadata::match_state.eq(MatchState::NeedsReview),
                         show_metadata::lookup_attempts.eq(0),
                         show_metadata::retry_at_ms.eq(None::<i64>),
                     );
@@ -424,7 +420,7 @@ impl Catalogue {
         self.db
             .run(move |conn| {
                 let values = (
-                    show_metadata::match_state.eq(RETRYING),
+                    show_metadata::match_state.eq(MatchState::Retrying),
                     show_metadata::lookup_attempts.eq(failed_attempts),
                     show_metadata::retry_at_ms.eq(Some(retry_at_ms)),
                 );
@@ -445,7 +441,7 @@ impl Catalogue {
             .run(|conn| {
                 let shows: Vec<(i32, String, i32)> = show::table
                     .inner_join(show_metadata::table)
-                    .filter(show_metadata::match_state.eq(NEEDS_REVIEW))
+                    .filter(show_metadata::match_state.eq(MatchState::NeedsReview))
                     .order((show::name.asc(), show::year.asc(), show::id.asc()))
                     .select((show::id, show::name, show::year))
                     .load(conn)?;
@@ -503,12 +499,12 @@ impl Catalogue {
                 let seasons: Vec<(i32, i32, i32, Option<i64>, Option<i32>)> = season::table
                     .inner_join(show::table.inner_join(show_metadata::table))
                     .left_join(season_metadata::table)
-                    .filter(show_metadata::match_state.eq(MATCHED))
+                    .filter(show_metadata::match_state.eq(MatchState::Matched))
                     .filter(
                         season_metadata::season_id
                             .is_null()
                             .or(season_metadata::match_state
-                                .eq(RETRYING)
+                                .eq(MatchState::Retrying)
                                 .and(season_metadata::retry_at_ms.le(now))),
                     )
                     .order(season::id.asc())
@@ -526,12 +522,12 @@ impl Catalogue {
                         season::table.inner_join(show::table.inner_join(show_metadata::table)),
                     )
                     .left_join(episode_metadata::table)
-                    .filter(show_metadata::match_state.eq(MATCHED))
+                    .filter(show_metadata::match_state.eq(MatchState::Matched))
                     .filter(
                         episode_metadata::episode_id
                             .is_null()
                             .or(episode_metadata::match_state
-                                .eq(RETRYING)
+                                .eq(MatchState::Retrying)
                                 .and(episode_metadata::retry_at_ms.le(now))),
                     )
                     .order(episode::id.asc())
@@ -577,7 +573,11 @@ impl Catalogue {
         self.db
             .run(move |conn| {
                 conn.transaction(|conn| {
-                    let state = if found.is_some() { MATCHED } else { NOT_FOUND };
+                    let state = if found.is_some() {
+                        MatchState::Matched
+                    } else {
+                        MatchState::NotFound
+                    };
                     let found = found.unwrap_or_default();
                     let current = season_rows(conn, &[season_id])?.pop();
                     let (name, description, image_key) = match current {
@@ -626,9 +626,13 @@ impl Catalogue {
         self.db
             .run(move |conn| {
                 conn.transaction(|conn| {
-                    let state = if found.is_some() { MATCHED } else { NOT_FOUND };
+                    let state = if found.is_some() {
+                        MatchState::Matched
+                    } else {
+                        MatchState::NotFound
+                    };
                     let found = found.unwrap_or_default();
-                    let tmdb_id = (state == MATCHED).then_some(found.tmdb_id);
+                    let tmdb_id = (state == MatchState::Matched).then_some(found.tmdb_id);
                     let current = episode_rows(conn, &[episode_id])?.pop();
                     let (name, description, image_key, air_date, imdb_id) = match current {
                         Some(c) => {
@@ -690,7 +694,7 @@ impl Catalogue {
                 match part {
                     Part::Season { season_id } => {
                         let values = (
-                            season_metadata::match_state.eq(RETRYING),
+                            season_metadata::match_state.eq(MatchState::Retrying),
                             season_metadata::lookup_attempts.eq(failed_attempts),
                             season_metadata::retry_at_ms.eq(Some(retry_at_ms)),
                         );
@@ -703,7 +707,7 @@ impl Catalogue {
                     }
                     Part::Episode { episode_id, .. } => {
                         let values = (
-                            episode_metadata::match_state.eq(RETRYING),
+                            episode_metadata::match_state.eq(MatchState::Retrying),
                             episode_metadata::lookup_attempts.eq(failed_attempts),
                             episode_metadata::retry_at_ms.eq(Some(retry_at_ms)),
                         );

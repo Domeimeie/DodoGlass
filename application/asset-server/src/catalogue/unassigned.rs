@@ -7,13 +7,12 @@ use diesel::prelude::*;
 use dodoglass_ids::{Placement, UnassignedReason, place_upload};
 use serde::{Deserialize, Serialize};
 
+use super::match_state::MatchState;
 use super::media_files::Owner;
 use super::metadata::{MovieMatch, apply_movie_match};
 use super::schema::{media_file, movie_metadata, show, show_metadata};
 use super::show_metadata::{ShowMatch, apply_show_match};
 use super::{Catalogue, media_files, movies, shows};
-
-const MATCHED: &str = "matched";
 
 /// An Unassigned media file, as the admin API lists it.
 #[derive(Debug, Clone, Serialize)]
@@ -161,12 +160,12 @@ impl Catalogue {
                     }
                     let movie_id =
                         movies::find_or_create(conn, &found.name, folder_year(found.year)?)?;
-                    let state: Option<String> = movie_metadata::table
+                    let state: Option<MatchState> = movie_metadata::table
                         .find(movie_id)
                         .select(movie_metadata::match_state)
                         .first(conn)
                         .optional()?;
-                    if state.as_deref() != Some(MATCHED) {
+                    if state != Some(MatchState::Matched) {
                         apply_movie_match(conn, movie_id, found)?;
                     }
                     attached(media_files::attach(conn, &id, Owner::Movie(movie_id))?)
@@ -207,12 +206,12 @@ impl Catalogue {
                         .filter(show::folder_year.eq(i32::from(year)))
                         .select(show::id)
                         .first(conn)?;
-                    let state: Option<String> = show_metadata::table
+                    let state: Option<MatchState> = show_metadata::table
                         .find(show_id)
                         .select(show_metadata::match_state)
                         .first(conn)
                         .optional()?;
-                    if state.as_deref() != Some(MATCHED) {
+                    if state != Some(MatchState::Matched) {
                         apply_show_match(conn, show_id, found)?;
                     }
                     let owner = Owner::Episode(episode_id);

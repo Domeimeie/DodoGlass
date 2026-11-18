@@ -12,12 +12,9 @@ use anyhow::Result;
 use diesel::prelude::*;
 use serde::Serialize;
 
+use super::match_state::MatchState;
 use super::schema::{movie, movie_candidate, movie_metadata};
 use super::{Catalogue, MovieView};
-
-const MATCHED: &str = "matched";
-const NEEDS_REVIEW: &str = "needs_review";
-const RETRYING: &str = "retrying";
 
 /// The descriptive fields an admin can lock (as stored in `locked_fields`).
 pub const LOCKABLE_FIELDS: [&str; 5] = ["name", "year", "imdb_id", "description", "image"];
@@ -192,7 +189,7 @@ pub(super) fn apply_movie_match(
             .execute(conn)?;
     }
     let values = (
-        movie_metadata::match_state.eq(MATCHED),
+        movie_metadata::match_state.eq(MatchState::Matched),
         movie_metadata::lookup_attempts.eq(0),
         movie_metadata::retry_at_ms.eq(None::<i64>),
         movie_metadata::tmdb_id.eq(Some(found.tmdb_id)),
@@ -223,7 +220,7 @@ impl Catalogue {
                         movie_metadata::movie_id
                             .is_null()
                             .or(movie_metadata::match_state
-                                .eq(RETRYING)
+                                .eq(MatchState::Retrying)
                                 .and(movie_metadata::retry_at_ms.le(now))),
                     )
                     .order(movie::id.asc())
@@ -265,7 +262,7 @@ impl Catalogue {
             .run(move |conn| {
                 conn.transaction(|conn| {
                     let values = (
-                        movie_metadata::match_state.eq(NEEDS_REVIEW),
+                        movie_metadata::match_state.eq(MatchState::NeedsReview),
                         movie_metadata::lookup_attempts.eq(0),
                         movie_metadata::retry_at_ms.eq(None::<i64>),
                     );
@@ -315,7 +312,7 @@ impl Catalogue {
         self.db
             .run(move |conn| {
                 let values = (
-                    movie_metadata::match_state.eq(RETRYING),
+                    movie_metadata::match_state.eq(MatchState::Retrying),
                     movie_metadata::lookup_attempts.eq(failed_attempts),
                     movie_metadata::retry_at_ms.eq(Some(retry_at_ms)),
                 );
@@ -336,7 +333,7 @@ impl Catalogue {
             .run(|conn| {
                 let movies: Vec<(i32, String, i32)> = movie::table
                     .inner_join(movie_metadata::table)
-                    .filter(movie_metadata::match_state.eq(NEEDS_REVIEW))
+                    .filter(movie_metadata::match_state.eq(MatchState::NeedsReview))
                     .order((movie::name.asc(), movie::year.asc(), movie::id.asc()))
                     .select((movie::id, movie::name, movie::year))
                     .load(conn)?;
