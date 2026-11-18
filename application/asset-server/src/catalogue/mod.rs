@@ -1,4 +1,4 @@
-//! The Catalogue: Movies and their Media files, and the rules about them.
+//! The Catalogue: Movies and Shows, their Media files, and the rules about them.
 //! Every change and every read of the catalogue goes through here; the HTTP
 //! layer, the ingest listener and the reconciler stay thin.
 //!

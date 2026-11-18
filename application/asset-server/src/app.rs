@@ -83,7 +83,8 @@ impl App {
         http::router(state).merge(http::images::router(self.assets.clone()))
     }
 
-    /// One pass of TMDB lookups: new Movies, and retries that are due.
+    /// One pass of TMDB lookups: new Movies, Shows, Seasons and Episodes, and
+    /// retries that are due.
     pub async fn match_metadata(&self) -> Result<()> {
         self.matcher.run_once().await
     }

@@ -1,4 +1,5 @@
-//! DodoGlass asset server: the catalogue of Movies and their Media files.
+//! DodoGlass asset server: the catalogue of Movies and Shows (Seasons,
+//! Episodes) and their Media files.
 
 use std::io::{self, IsTerminal};
 use std::net::SocketAddr;
@@ -88,8 +89,8 @@ struct Cli {
           value_parser = clap::value_parser!(u64).range(1..))]
     reconcile_interval: u64,
 
-    /// TMDB API key (v3) or read access token (v4). Without one, Movies are not
-    /// looked up and keep the name and year from their folder
+    /// TMDB API key (v3) or read access token (v4). Without one, Movies and Shows are
+    /// not looked up and keep the name and year from their folder
     #[arg(long, env = "ASSETS_TMDB_API_KEY", hide_env_values = true)]
     tmdb_api_key: Option<String>,
 
@@ -97,7 +98,8 @@ struct Cli {
     #[arg(long, env = "ASSETS_TMDB_LANGUAGE", default_value = "en-US")]
     tmdb_language: String,
 
-    /// Seconds between two passes looking new Movies (and due retries) up in TMDB
+    /// Seconds between two passes looking new Movies, Shows, Seasons and Episodes (and
+    /// due retries) up in TMDB
     #[arg(long, env = "ASSETS_TMDB_INTERVAL", default_value_t = 10,
           value_parser = clap::value_parser!(u64).range(1..))]
     tmdb_interval: u64,
@@ -182,7 +184,7 @@ async fn run(cli: Cli) -> Result<()> {
         app.spawn_periodic_matcher(Duration::from_secs(cli.tmdb_interval));
         info!(language = %cli.tmdb_language, "TMDB lookups on");
     } else {
-        warn!("no TMDB API key (--tmdb-api-key): Movies are not looked up");
+        warn!("no TMDB API key (--tmdb-api-key): Movies and Shows are not looked up");
     }
 
     let listener = tokio::net::TcpListener::bind(cli.http_addr)
