@@ -3,6 +3,8 @@
 
 mod common;
 
+use std::time::Duration;
+
 use common::TestApp;
 use common::tmdb::movie;
 use serde_json::json;
@@ -111,4 +113,81 @@ async fn several_exact_results_need_review_with_the_top_five_kept() {
         .collect();
     assert_eq!(ids, [1, 2, 3, 4, 5]);
     assert_eq!(app.get_json("/movies").await[0].get("tmdb_id"), None);
+}
+
+#[tokio::test]
+async fn while_tmdb_is_unreachable_the_lookup_is_retried_not_sent_to_review() {
+    let app = TestApp::start().await;
+    app.tmdb.add_movie(movie(603, "The Matrix", 1999));
+    app.tmdb.set_unreachable(true);
+
+    ready_movie(&app, MATRIX).await;
+
+    let listed = &app.get_json("/movies").await[0];
+    assert_eq!(listed["name"], json!("The Matrix"));
+    assert_eq!(listed.get("tmdb_id"), None);
+    assert_eq!(
+        app.get_json("/admin/needs-review").await["movies"],
+        json!([])
+    );
+
+    app.tmdb.set_unreachable(false);
+    app.match_metadata().await;
+    assert_eq!(
+        app.get_json("/movies").await[0].get("tmdb_id"),
+        None,
+        "the retry waits for its backoff"
+    );
+
+    app.advance(Duration::from_secs(30));
+    app.match_metadata().await;
+    assert_eq!(app.get_json("/movies").await[0]["tmdb_id"], json!(603));
+}
+
+#[tokio::test]
+async fn after_about_an_hour_of_retries_the_movie_needs_review() {
+    let app = TestApp::start().await;
+    app.tmdb.set_unreachable(true);
+
+    ready_movie(&app, MATRIX).await;
+    for _ in 0..12 {
+        app.advance(Duration::from_secs(5 * 60));
+        app.match_metadata().await;
+    }
+    assert_eq!(
+        app.get_json("/admin/needs-review").await["movies"],
+        json!([])
+    );
+
+    for _ in 0..6 {
+        app.advance(Duration::from_secs(5 * 60));
+        app.match_metadata().await;
+    }
+    assert_needs_review(&app, json!([])).await;
+}
+
+#[tokio::test]
+async fn browsing_works_while_tmdb_is_unreachable() {
+    let app = TestApp::start().await;
+    app.tmdb.set_unreachable(true);
+
+    ready_movie(&app, MATRIX).await;
+
+    let listed = &app.get_json("/movies").await[0];
+    assert_eq!(listed["media_files"][0]["label"], json!("matrix"));
+}
+
+#[tokio::test]
+async fn a_second_media_file_of_a_matched_movie_does_not_call_tmdb_again() {
+    let app = TestApp::start().await;
+    app.tmdb.add_movie(movie(603, "The Matrix", 1999));
+    ready_movie(&app, MATRIX).await;
+    let calls = app.tmdb.calls();
+
+    ready_movie(&app, "movies/The Matrix (1999)/matrix-directors-cut.mkv").await;
+    app.advance(Duration::from_secs(24 * 3600));
+    app.match_metadata().await;
+
+    assert_eq!(app.tmdb.calls(), calls);
+    assert_eq!(app.get_json("/movies").await[0]["tmdb_id"], json!(603));
 }
