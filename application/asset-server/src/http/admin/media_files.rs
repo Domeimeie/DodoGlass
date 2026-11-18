@@ -13,7 +13,7 @@ use crate::http::ApiError;
 
 pub fn routes() -> Router<Catalogue> {
     Router::new()
-        .route("/media-files/{id}", get(show).patch(edit))
+        .route("/media-files/{id}", get(show).patch(edit).delete(remove))
         .route("/media-files/{id}/default", put(set_default))
 }
 
@@ -25,6 +25,15 @@ pub(super) fn answer(change: Change, what: &str) -> Result<StatusCode, ApiError>
         Change::Refused(message) => Err(ApiError::conflict(message)),
         Change::Invalid(message) => Err(ApiError::bad_request(message)),
     }
+}
+
+/// `DELETE /admin/media-files/<id>`: deletes its output in `final` and its
+/// entry; its Movie or Episode stays.
+async fn remove(
+    State(catalogue): State<Catalogue>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    answer(catalogue.remove_media_file(&id).await?, "such Media file")
 }
 
 #[derive(Deserialize)]

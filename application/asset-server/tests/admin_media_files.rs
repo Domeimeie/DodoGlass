@@ -7,6 +7,9 @@ mod common;
 use std::time::Duration;
 
 use common::TestApp;
+use common::tmdb::movie;
+use futures_util::StreamExt;
+use object_store::ObjectStore;
 use serde_json::{Value, json};
 
 const MATRIX: &str = "movies/The Matrix (1999)/matrix.mkv";
@@ -228,4 +231,130 @@ async fn renaming_an_unknown_media_file_is_not_found() {
     let app = TestApp::start().await;
 
     assert_eq!(rename(&app, MATRIX, "matrix").await, 404);
+}
+
+// --- removing a Media file ----------------------------------------------------
+
+/// The keys under `<id of key>/` in `final`.
+async fn outputs(app: &TestApp, key: &str) -> Vec<String> {
+    let prefix = object_store::path::Path::parse(id(key)).unwrap();
+    let mut keys: Vec<String> = app
+        .buckets
+        .final_
+        .list(Some(&prefix))
+        .map(|o| o.unwrap().location.to_string())
+        .collect()
+        .await;
+    keys.sort();
+    keys
+}
+
+#[tokio::test]
+async fn removing_a_media_file_deletes_its_output_in_final_and_its_entry() {
+    let app = TestApp::start().await;
+    upload_ready(&app, MATRIX).await;
+    upload_ready(&app, DIRECTORS_CUT).await;
+    assert!(!outputs(&app, DIRECTORS_CUT).await.is_empty());
+
+    let status = delete(&app, &uri(DIRECTORS_CUT)).await;
+
+    assert_eq!(status, 204);
+    assert_eq!(outputs(&app, DIRECTORS_CUT).await, Vec::<String>::new());
+    assert_eq!(app.get(&uri(DIRECTORS_CUT)).await.0, 404);
+    assert_eq!(labels(&app).await, vec!["matrix"]);
+    assert_eq!(
+        outputs(&app, MATRIX).await.len(),
+        3,
+        "the other output stays"
+    );
+}
+
+#[tokio::test]
+async fn a_removed_media_file_is_not_placed_again_by_the_reconciler() {
+    let app = TestApp::start().await;
+    upload_ready(&app, MATRIX).await;
+    upload_ready(&app, DIRECTORS_CUT).await;
+
+    delete(&app, &uri(DIRECTORS_CUT)).await;
+    app.reconcile().await;
+
+    assert_eq!(labels(&app).await, vec!["matrix"]);
+}
+
+#[tokio::test]
+async fn removing_an_unknown_media_file_is_not_found() {
+    let app = TestApp::start().await;
+
+    assert_eq!(delete(&app, &uri(MATRIX)).await, 404);
+}
+
+#[tokio::test]
+async fn removing_the_default_makes_the_oldest_remaining_ready_one_the_default() {
+    let app = TestApp::start().await;
+    upload_ready(&app, MATRIX).await;
+    app.advance(MINUTE);
+    upload_ready(&app, DIRECTORS_CUT).await;
+    app.advance(MINUTE);
+    upload_ready(&app, EXTENDED).await;
+
+    delete(&app, &uri(MATRIX)).await;
+
+    assert_eq!(
+        movie_default(&app).await.as_deref(),
+        Some("matrix-directors-cut")
+    );
+}
+
+#[tokio::test]
+async fn removing_the_default_skips_media_files_that_are_not_ready() {
+    let app = TestApp::start().await;
+    upload_ready(&app, MATRIX).await;
+    app.advance(MINUTE);
+    app.upload(DIRECTORS_CUT).await;
+    app.advance(MINUTE);
+    upload_ready(&app, EXTENDED).await;
+
+    delete(&app, &uri(MATRIX)).await;
+
+    assert_eq!(
+        movie_default(&app).await.as_deref(),
+        Some("matrix-extended")
+    );
+}
+
+#[tokio::test]
+async fn removing_the_default_with_nothing_else_ready_leaves_the_default_to_the_next_one() {
+    let app = TestApp::start().await;
+    upload_ready(&app, MATRIX).await;
+    app.upload(DIRECTORS_CUT).await;
+
+    delete(&app, &uri(MATRIX)).await;
+    app.finish_transcode(DIRECTORS_CUT).await;
+    app.reconcile().await;
+
+    assert_eq!(
+        movie_default(&app).await.as_deref(),
+        Some("matrix-directors-cut")
+    );
+}
+
+#[tokio::test]
+async fn a_movie_whose_last_media_file_was_removed_is_hidden_and_comes_back_with_its_metadata() {
+    let app = TestApp::start().await;
+    app.tmdb.add_movie(movie(603, "The Matrix", 1999));
+    upload_ready(&app, MATRIX).await;
+    app.match_metadata().await;
+    let calls = app.tmdb.calls();
+
+    delete(&app, &uri(MATRIX)).await;
+    assert_eq!(app.get_json("/movies").await, json!([]));
+
+    upload_ready(&app, DIRECTORS_CUT).await;
+    app.match_metadata().await;
+
+    let listed = &app.get_json("/movies").await[0];
+    assert_eq!(listed["tmdb_id"], json!(603));
+    assert_eq!(listed["description"], json!("About The Matrix."));
+    assert_eq!(default_of(listed).as_deref(), Some("matrix-directors-cut"));
+    assert_eq!(app.tmdb.calls(), calls, "no new lookup: the Movie was kept");
 }

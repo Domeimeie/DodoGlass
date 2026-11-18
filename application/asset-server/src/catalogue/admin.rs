@@ -7,6 +7,7 @@ use diesel::prelude::*;
 use super::Catalogue;
 use super::media_files::{self, READY};
 use super::schema::media_file;
+use crate::ports::storage::delete_output;
 
 /// The outcome of an admin change.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +35,34 @@ fn refused(message: &str) -> Result<Change> {
 }
 
 impl Catalogue {
+    /// Removes Media file `id`: its output in `final`, then its entry. Its
+    /// Movie or Episode stays (Hidden if nothing Ready is left), and if it was
+    /// the default, the oldest remaining Ready one takes over (or else the
+    /// oldest remaining one).
+    pub async fn remove_media_file(&self, id: &str) -> Result<Change> {
+        let id = id.to_string();
+        let lookup = id.clone();
+        let exists = self
+            .db
+            .run(move |conn| Ok(media_files::owner_of(conn, &lookup)?.is_some()))
+            .await?;
+        if !exists {
+            return Ok(Change::NotFound);
+        }
+        // The output first: if this is cut short, the entry is still there
+        // (Missing at worst) and the admin can remove it again.
+        delete_output(self.final_.as_ref(), &id).await?;
+        self.db
+            .run(move |conn| {
+                conn.transaction(|conn| {
+                    media_files::hand_over_default_before_removal(conn, &id)?;
+                    diesel::delete(media_file::table.find(&id)).execute(conn)?;
+                    Ok(Change::Done)
+                })
+            })
+            .await
+    }
+
     /// Renames the Label of Media file `id`. Labels stay unique within the
     /// Movie or Episode, so a Label another of its Media files has is refused.
     pub async fn rename_label(&self, id: &str, label: &str) -> Result<Change> {
