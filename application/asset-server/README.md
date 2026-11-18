@@ -32,11 +32,11 @@ Other tasks (from this folder): `go-task test`, `go-task lint`, `go-task fmt`, `
 
 | Module | What it does |
 |---|---|
-| `catalogue/` | The core: placing uploads (`placement.rs`), Media file states, Labels and the Default media file per owner (`media_files.rs`), Movies and what viewers see (`movies.rs`), Shows, Seasons and Episodes (`shows.rs`). Everything else goes through it |
+| `catalogue/` | The core: placing uploads (`placement.rs`), Media file states, Labels and the Default media file per owner (`media_files.rs`), Movies and what viewers see (`movies.rs`), Shows, Seasons and Episodes (`shows.rs`), Unassigned media files and attaching them (`unassigned.rs`). Everything else goes through it |
 | `ports/` | Upload events (`upload_events.rs`, MQTT in `mqtt.rs`), buckets (`storage.rs`), the clock (`clock.rs`) |
 | `ingest/` | The ingest listener: S3 events → `Catalogue::upload_seen`, ack after storing |
 | `reconcile.rs` | Output markers in `final` → Ready |
-| `http/` | axum routes, one module per part of the API (`movies.rs`, `shows.rs`), merged in `mod.rs` |
+| `http/` | axum routes, one module per part of the API (`movies.rs`, `shows.rs`), merged in `mod.rs`. The admin API is `http/admin/`, nested under `/admin`: add a module there and merge its `routes()` (paths relative to `/admin`) in `admin/mod.rs` |
 | `app.rs` | Builds everything; used by `main.rs` and by the tests |
 | `db.rs`, `migrations/` | SQLite connection, portable-SQL migrations (ADR 0002) |
 

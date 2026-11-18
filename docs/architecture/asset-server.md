@@ -47,12 +47,24 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   `GET /shows/{id}/seasons/{number}/episodes` → `[{"number", "media_files": [...]}]` (Media files as
   for Movies). Hidden applies at every level: an Episode needs a Ready Media file, a Season a listed
   Episode, a Show a listed Season; a Hidden or unknown Show or Season answers 404.
+- **Unassigned media files:** an upload outside the layout is stored without a Movie or Episode,
+  goes through Processing and Ready like any other, and is never in the read API.
+- **Admin API** (under `/admin`, no authentication, localhost only):
+  `GET /admin/unassigned-media-files` → `[{"id", "path", "reason", "state"}]` by path, the reason
+  taken from the path (`no_year`, `unknown_root_folder`, `wrong_depth`, `unsupported_extension`,
+  `unknown_season_folder`, `no_episode_code`, `season_mismatch`).
+  `POST /admin/unassigned-media-files/{id}/attach` with `{"movie": {"name", "year"}}` or
+  `{"episode": {"show", "year", "season", "number"}}` (folder names and years, as in the upload
+  layout) attaches it to that existing Movie or Episode → `{"id", "label"}`. The Label follows the
+  upload rule ("matrix (mkv)" if "matrix" is taken); it becomes the default only if the owner had no
+  Media file. 404 if the Media file is not Unassigned or the target does not exist. A re-upload to
+  the same path keeps it attached.
 - **Database:** SQLite via Diesel, migrations in portable SQL run at startup. Tables so far: `movie`
   (with `folder_name`/`folder_year`, the placement identity, apart from the displayed `name`/`year`)
   and `media_file`; `show` (same folder identity), `season`, `episode`, and `media_file.episode_id`.
 
 Not built yet: Failed and Missing, a new default when the default goes away, status hints,
-TMDB, images and the admin API.
+TMDB, images and the rest of the admin API.
 
 **Running it:** `go-task infra:up`, `go-task transcoder:serve-s3`, `go-task asset-server:serve`
 (HTTP on `127.0.0.1:8090`), then for example
