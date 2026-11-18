@@ -32,7 +32,7 @@ Other tasks (from this folder): `go-task test`, `go-task lint`, `go-task fmt`, `
 
 | Module | What it does |
 |---|---|
-| `catalogue/` | The core: placing uploads (`placement.rs`), Media file states (`media_files.rs`), Movies and what viewers see (`movies.rs`). Everything else goes through it |
+| `catalogue/` | The core: placing uploads (`placement.rs`), Media file states, Labels and the Default media file per owner (`media_files.rs`), Movies and what viewers see (`movies.rs`). Everything else goes through it |
 | `ports/` | Upload events (`upload_events.rs`, MQTT in `mqtt.rs`), buckets (`storage.rs`), the clock (`clock.rs`) |
 | `ingest/` | The ingest listener: S3 events → `Catalogue::upload_seen`, ack after storing |
 | `reconcile.rs` | Output markers in `final` → Ready |
@@ -80,5 +80,5 @@ rely on it being stored. Each `TestApp` has its own in-memory SQLite database wi
 migrations, so tests run in parallel. A new port (e.g. a TMDB fake) goes into `tests/common/mod.rs`
 and is passed to `App::start` next to the buckets and the clock.
 
-Put scenarios in a file per topic (`tests/movies.rs`, `tests/shows.rs`, ...), each starting with
+Put scenarios in a file per topic (`tests/movies.rs`, `tests/media_files.rs`, `tests/shows.rs`, ...), each starting with
 `mod common;`.

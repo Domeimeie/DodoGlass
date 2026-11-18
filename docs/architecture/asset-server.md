@@ -28,16 +28,23 @@ The tracer bullet: a Movie upload becomes listable.
 - **Placement of Movies:** `movies/<Name> (<Year>)/<label>.<ext>` creates the Movie (or finds it) and
   a **Processing** Media file whose id is the shared crate's task id. Keys are normalised to NFC.
   Every other upload is stored without a Movie (Unassigned); Shows come next.
+- **Several Media files per Movie:** each one's Label is its file name without the extension, made
+  unique within the Movie (`matrix.mkv` + `matrix.mp4` → "matrix", "matrix (mp4)"; a number is
+  added if that is taken too). The first one uploaded is the **Default media file**. A re-upload to
+  the same path keeps the id, Label and default flag and goes back to Processing. Labels and the
+  default are kept per *owner* of the Media file (`media_file.is_default`, unique indexes per
+  owner), so Episodes use the same rules.
 - **Reconciler:** a Processing Media file becomes **Ready** when `final/<id>/source.json` exists, at
   startup and every `--reconcile-interval` seconds (default 300). Its manifest keys follow the
   `formats` in the marker.
 - **Read API:** `GET /movies` lists the Movies that are not Hidden, with their Ready Media files:
-  `[{"name", "year", "media_files": [{"id", "label", "manifests": {"hls", "dash"}}]}]`.
+  `[{"name", "year", "media_files": [{"id", "label", "default", "manifests": {"hls", "dash"}}]}]`,
+  the Media files ordered by Label.
 - **Database:** SQLite via Diesel, migrations in portable SQL run at startup. Tables so far: `movie`
   (with `folder_name`/`folder_year`, the placement identity, apart from the displayed `name`/`year`)
   and `media_file`.
 
-Not built yet: Shows, several Media files and Labels per Movie, Failed and Missing, status hints,
+Not built yet: Shows, Failed and Missing, a new default when the default goes away, status hints,
 TMDB, images and the admin API.
 
 **Running it:** `go-task infra:up`, `go-task transcoder:serve-s3`, `go-task asset-server:serve`
@@ -185,7 +192,6 @@ erDiagram
         string image_key
         string match_state "matched, needs_review, retrying"
         text locked_fields
-        string default_media_file_id FK
     }
     SHOW {
         int id PK
@@ -217,7 +223,6 @@ erDiagram
         date air_date
         string imdb_id
         text locked_fields
-        string default_media_file_id FK
     }
     MEDIA_FILE {
         string id PK "task id"
@@ -225,6 +230,7 @@ erDiagram
         int movie_id FK "null if unassigned"
         int episode_id FK "null if unassigned"
         string label "unique per Movie or Episode"
+        bool is_default "one per Movie or Episode"
         string state "processing, ready, failed, missing"
         string hls_manifest
         string dash_manifest
@@ -232,7 +238,9 @@ erDiagram
     }
 ```
 
-A Media file belongs to a Movie **or** an Episode, or to neither while it is unassigned. Migrations
+A Media file belongs to a Movie **or** an Episode, or to neither while it is unassigned. The Default
+media file is a flag on the Media file rather than a column on its owner, so Movies and Episodes share
+one rule; partial unique indexes keep it to one per owner. Migrations
 stay within SQL that SQLite and Postgres both accept (ADR 0002).
 
 ## API
