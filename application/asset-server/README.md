@@ -37,13 +37,13 @@ Other tasks (from this folder): `go-task test`, `go-task lint`, `go-task fmt`, `
 
 | Module | What it does |
 |---|---|
-| `catalogue/` | The core: placing uploads (`placement.rs`), Media file states, Labels and the Default media file per owner (`media_files.rs`), Movies and what viewers see (`movies.rs`), Shows, Seasons and Episodes (`shows.rs`), Unassigned media files and attaching them (`unassigned.rs`), TMDB outcomes and Locked fields (`metadata.rs`). Everything else goes through it |
+| `catalogue/` | The core: placing uploads (`placement.rs`), Media file states, Labels and the Default media file per owner (`media_files.rs`), Movies and what viewers see (`movies.rs`), Shows, Seasons and Episodes (`shows.rs`), Unassigned media files and attaching them (`unassigned.rs`), TMDB outcomes and Locked fields (`metadata.rs`), the admin's changes: default, Labels, removing Media files, deleting Hidden entries (`admin.rs`). Everything else goes through it |
 | `ports/` | Upload events (`upload_events.rs`, MQTT in `mqtt.rs`), status hints (`status_hints.rs`, MQTT in `mqtt_status.rs`), buckets (`storage.rs`), the clock (`clock.rs`), TMDB (`tmdb.rs`: the `Tmdb` trait and the reqwest client) |
 | `ingest/` | The ingest listener: S3 events → `Catalogue::upload_seen`, ack after storing |
 | `reconcile.rs` | Output markers in `final` → Ready, Missing, Failed after 24 h; unseen outputs placed from their marker |
 | `status.rs` | The status listener: `completed` → early reconcile of that Media file, `failed` → Failed |
 | `matcher.rs` | TMDB lookups for new Movies: strict Match, Needs review, retries with backoff, poster download |
-| `http/` | axum routes, one module per part of the API (`movies.rs`, `shows.rs`, `images.rs`), merged in `mod.rs`. The admin API is `http/admin/` (`media_files.rs`, `review.rs`, `unassigned.rs`), nested under `/admin`: add a module there and merge its `routes()` (paths relative to `/admin`) in `admin/mod.rs` |
+| `http/` | axum routes, one module per part of the API (`movies.rs`, `shows.rs`, `images.rs`), merged in `mod.rs`. The admin API is `http/admin/` (`media_files.rs`, `hidden.rs`, `review.rs`, `unassigned.rs`), nested under `/admin`: add a module there and merge its `routes()` (paths relative to `/admin`) in `admin/mod.rs` |
 | `app.rs` | Builds everything; used by `main.rs` and by the tests |
 | `db.rs`, `migrations/` | SQLite connection, portable-SQL migrations (ADR 0002) |
 
