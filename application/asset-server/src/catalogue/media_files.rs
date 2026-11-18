@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use diesel::prelude::*;
+use diesel::sqlite::Sqlite;
 use serde::Serialize;
 
 use super::Catalogue;
@@ -44,6 +45,39 @@ impl MediaFileState {
     }
 }
 
+impl MediaFileState {
+    fn as_str(self) -> &'static str {
+        match self {
+            MediaFileState::Processing => PROCESSING,
+            MediaFileState::Ready => READY,
+            MediaFileState::Failed => FAILED,
+            MediaFileState::Missing => MISSING,
+        }
+    }
+}
+
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = media_file)]
+struct StatusRow {
+    id: String,
+    source_key: String,
+    label: String,
+    state: String,
+    error: Option<String>,
+}
+
+impl StatusRow {
+    fn into_status(self) -> Result<MediaFileStatus> {
+        Ok(MediaFileStatus {
+            id: self.id,
+            key: self.source_key,
+            label: self.label,
+            state: MediaFileState::parse(&self.state)?,
+            error: self.error,
+        })
+    }
+}
+
 /// A Media file the reconciler checks against `final`.
 #[derive(Debug, Clone)]
 pub struct TrackedMediaFile {
@@ -60,6 +94,9 @@ pub struct TrackedMediaFile {
 #[derive(Debug, Clone, Serialize)]
 pub struct MediaFileStatus {
     pub id: String,
+    /// The upload key in `ingest`.
+    pub key: String,
+    pub label: String,
     pub state: MediaFileState,
     pub error: Option<String>,
 }
@@ -80,6 +117,130 @@ pub struct Manifests {
 pub(super) enum Owner {
     Movie(i32),
     Episode(i32),
+}
+
+impl Owner {
+    pub(super) fn of(movie: Option<i32>, episode: Option<i32>) -> Option<Owner> {
+        match (movie, episode) {
+            (Some(movie), _) => Some(Owner::Movie(movie)),
+            (None, Some(episode)) => Some(Owner::Episode(episode)),
+            (None, None) => None,
+        }
+    }
+
+    /// The Media files of this owner.
+    fn files(self) -> media_file::BoxedQuery<'static, Sqlite> {
+        match self {
+            Owner::Movie(movie) => media_file::table
+                .filter(media_file::movie_id.eq(movie))
+                .into_boxed(),
+            Owner::Episode(episode) => media_file::table
+                .filter(media_file::episode_id.eq(episode))
+                .into_boxed(),
+        }
+    }
+}
+
+/// The owner of Media file `id` and whether it is the owner's default;
+/// `None` if there is no such Media file.
+pub(super) fn owner_of(
+    conn: &mut SqliteConnection,
+    id: &str,
+) -> Result<Option<(Option<Owner>, bool)>> {
+    let row: Option<(Option<i32>, Option<i32>, bool)> = media_file::table
+        .find(id)
+        .select((
+            media_file::movie_id,
+            media_file::episode_id,
+            media_file::is_default,
+        ))
+        .first(conn)
+        .optional()?;
+    Ok(row.map(|(movie, episode, is_default)| (Owner::of(movie, episode), is_default)))
+}
+
+/// Makes Media file `id` the Default media file of `owner`, in place of the
+/// current one.
+pub(super) fn make_default(conn: &mut SqliteConnection, owner: Owner, id: &str) -> Result<()> {
+    // The old default first: the unique index allows one default per owner.
+    match owner {
+        Owner::Movie(movie) => diesel::update(media_file::table)
+            .filter(media_file::movie_id.eq(movie))
+            .set(media_file::is_default.eq(false))
+            .execute(conn)?,
+        Owner::Episode(episode) => diesel::update(media_file::table)
+            .filter(media_file::episode_id.eq(episode))
+            .set(media_file::is_default.eq(false))
+            .execute(conn)?,
+    };
+    diesel::update(media_file::table.find(id))
+        .set(media_file::is_default.eq(true))
+        .execute(conn)?;
+    Ok(())
+}
+
+/// The oldest Media file of `owner` other than `except`, Ready ones only if
+/// `ready_only`.
+fn oldest(
+    conn: &mut SqliteConnection,
+    owner: Owner,
+    except: &str,
+    ready_only: bool,
+) -> Result<Option<String>> {
+    let mut query = owner.files().filter(media_file::id.ne(except.to_string()));
+    if ready_only {
+        query = query.filter(media_file::state.eq(READY));
+    }
+    Ok(query
+        .order((media_file::created_ms.asc(), media_file::id.asc()))
+        .select(media_file::id)
+        .first(conn)
+        .optional()?)
+}
+
+/// Media file `id` can no longer play (Missing, Failed): if it is its
+/// owner's default, the oldest other Ready Media file takes over. With none,
+/// it stays the default.
+pub(super) fn hand_over_default(conn: &mut SqliteConnection, id: &str) -> Result<()> {
+    let Some((Some(owner), true)) = owner_of(conn, id)? else {
+        return Ok(());
+    };
+    if let Some(next) = oldest(conn, owner, id, true)? {
+        make_default(conn, owner, &next)?;
+    }
+    Ok(())
+}
+
+/// Media file `id` is about to be removed: if it is its owner's default, the
+/// oldest other Ready Media file takes over, or else the oldest other one.
+pub(super) fn hand_over_default_before_removal(
+    conn: &mut SqliteConnection,
+    id: &str,
+) -> Result<()> {
+    let Some((Some(owner), true)) = owner_of(conn, id)? else {
+        return Ok(());
+    };
+    let next = match oldest(conn, owner, id, true)? {
+        Some(next) => Some(next),
+        None => oldest(conn, owner, id, false)?,
+    };
+    if let Some(next) = next {
+        make_default(conn, owner, &next)?;
+    }
+    Ok(())
+}
+
+/// The Labels of `owner`'s Media files other than `except`.
+pub(super) fn other_labels(
+    conn: &mut SqliteConnection,
+    owner: Owner,
+    except: &str,
+) -> Result<Vec<String>> {
+    Ok(owner
+        .files()
+        .filter(media_file::id.ne(except.to_string()))
+        .select(media_file::label)
+        .load(conn)?)
 }
 
 /// Creates the Media file `id` as Processing, or makes an existing one
@@ -176,13 +337,7 @@ pub(super) fn attach(
 
 /// The Labels of every Media file of `owner`, whatever its state.
 fn labels_of(conn: &mut SqliteConnection, owner: Owner) -> Result<Vec<String>> {
-    let query = media_file::table.select(media_file::label);
-    Ok(match owner {
-        Owner::Movie(movie) => query.filter(media_file::movie_id.eq(movie)).load(conn)?,
-        Owner::Episode(episode) => query
-            .filter(media_file::episode_id.eq(episode))
-            .load(conn)?,
-    })
+    Ok(owner.files().select(media_file::label).load(conn)?)
 }
 
 /// `stem` if no other Media file of the owner has it, else `stem (ext)`
@@ -258,19 +413,30 @@ impl Catalogue {
         let id = id.to_string();
         self.db
             .run(move |conn| {
-                let row: Option<(String, String, Option<String>)> = media_file::table
+                let row: Option<StatusRow> = media_file::table
                     .find(&id)
-                    .select((media_file::id, media_file::state, media_file::error))
+                    .select(StatusRow::as_select())
                     .first(conn)
                     .optional()?;
-                row.map(|(id, state, error)| {
-                    Ok(MediaFileStatus {
-                        id,
-                        state: MediaFileState::parse(&state)?,
-                        error,
-                    })
-                })
-                .transpose()
+                row.map(StatusRow::into_status).transpose()
+            })
+            .await
+    }
+
+    /// The Media files in any of `states`, by upload key.
+    pub async fn media_files_in(
+        &self,
+        states: Vec<MediaFileState>,
+    ) -> Result<Vec<MediaFileStatus>> {
+        let states: Vec<&'static str> = states.into_iter().map(MediaFileState::as_str).collect();
+        self.db
+            .run(move |conn| {
+                let rows: Vec<StatusRow> = media_file::table
+                    .filter(media_file::state.eq_any(states))
+                    .order(media_file::source_key.asc())
+                    .select(StatusRow::as_select())
+                    .load(conn)?;
+                rows.into_iter().map(StatusRow::into_status).collect()
             })
             .await
     }
@@ -308,15 +474,20 @@ impl Catalogue {
         let now = self.clock.now_ms();
         self.db
             .run(move |conn| {
-                diesel::update(media_file::table.find(&id))
-                    .filter(media_file::state.eq_any(from))
-                    .set((
-                        media_file::state.eq(to),
-                        media_file::state_since_ms.eq(now),
-                        media_file::error.eq(error),
-                    ))
-                    .execute(conn)?;
-                Ok(())
+                conn.transaction(|conn| {
+                    let changed = diesel::update(media_file::table.find(&id))
+                        .filter(media_file::state.eq_any(from))
+                        .set((
+                            media_file::state.eq(to),
+                            media_file::state_since_ms.eq(now),
+                            media_file::error.eq(error),
+                        ))
+                        .execute(conn)?;
+                    if changed > 0 && to != READY {
+                        hand_over_default(conn, &id)?;
+                    }
+                    Ok(())
+                })
             })
             .await
     }

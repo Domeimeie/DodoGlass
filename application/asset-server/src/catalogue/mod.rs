@@ -9,8 +9,11 @@
 //! - [`shows`]: Shows, Seasons and Episodes, and what viewers see of them;
 //! - [`unassigned`]: Unassigned media files, and attaching them;
 //! - [`metadata`]: what TMDB lookups found (Match, Needs review, retries)
-//!   and Locked fields.
+//!   and Locked fields;
+//! - [`admin`]: what an admin changes: the Default media file, Labels,
+//!   removing Media files and deleting Hidden entries.
 
+mod admin;
 mod media_files;
 mod metadata;
 mod movies;
@@ -21,9 +24,12 @@ mod unassigned;
 
 use std::sync::Arc;
 
+use object_store::ObjectStore;
+
 use crate::db::Db;
 use crate::ports::clock::Clock;
 
+pub use admin::{Change, Entry};
 pub use media_files::{
     Manifests, MediaFileState, MediaFileStatus, PROCESSING_TIMEOUT_MS, TIMED_OUT, TrackedMediaFile,
 };
@@ -39,10 +45,12 @@ pub use unassigned::{AttachTo, Attached, UnassignedView};
 pub struct Catalogue {
     db: Db,
     clock: Arc<dyn Clock>,
+    /// The `final` bucket, where removing a Media file deletes its output.
+    final_: Arc<dyn ObjectStore>,
 }
 
 impl Catalogue {
-    pub fn new(db: Db, clock: Arc<dyn Clock>) -> Self {
-        Catalogue { db, clock }
+    pub fn new(db: Db, clock: Arc<dyn Clock>, final_: Arc<dyn ObjectStore>) -> Self {
+        Catalogue { db, clock, final_ }
     }
 }
