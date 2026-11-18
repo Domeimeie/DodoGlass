@@ -210,25 +210,26 @@ async fn while_tmdb_is_unreachable_the_lookup_is_retried_not_sent_to_review() {
 }
 
 #[tokio::test]
-async fn after_about_an_hour_of_retries_the_movie_needs_review() {
+async fn a_long_outage_keeps_the_movie_retrying_hourly_and_out_of_review() {
     let app = TestApp::start().await;
+    app.tmdb.add_movie(movie(603, "The Matrix", 1999));
     app.tmdb.set_unreachable(true);
 
     ready_movie(&app, MATRIX).await;
-    for _ in 0..12 {
+    for _ in 0..(12 * 6) {
         app.advance(Duration::from_secs(5 * 60));
         app.match_metadata().await;
     }
     assert_eq!(
         app.get_json("/admin/needs-review").await["movies"],
-        json!([])
+        json!([]),
+        "an outage does not fill the review queue"
     );
 
-    for _ in 0..6 {
-        app.advance(Duration::from_secs(5 * 60));
-        app.match_metadata().await;
-    }
-    assert_needs_review(&app, json!([])).await;
+    app.tmdb.set_unreachable(false);
+    app.advance(Duration::from_secs(3600));
+    app.match_metadata().await;
+    assert_eq!(app.get_json("/movies").await[0]["tmdb_id"], json!(603));
 }
 
 #[tokio::test]

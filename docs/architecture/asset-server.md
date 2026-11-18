@@ -78,8 +78,9 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   searching by its folder's name and year (`/search/movie`, `/search/tv` with the first-air year). Exactly one result with that year and the same name (ignoring case and punctuation)
   is a **Match**: name, year, imdbID, TMDB id, description and poster are filled in, except
   **Locked fields**. Otherwise **Needs review** with the top 5 results kept as candidates. While TMDB
-  is unreachable or rate limiting (429, 5xx), the lookup is retried after 30 s, doubling up to 32 min
-  (about an hour in all), then Needs review; the entry shows its folder's name and year meanwhile. A
+  is unreachable or rate limiting (429, 5xx), the lookup is retried after 30 s, doubling up to 1 h,
+  then hourly for as long as the outage lasts: an outage never fills Needs review. The entry stays
+  `retrying` and shows its folder's name and year meanwhile. A
   pass runs every `--tmdb-interval` seconds (default 10): Movies, then Shows, then the Seasons and
   Episodes of matched Shows, so a Show's Match fills them in the same pass. The port (`Tmdb` trait,
   reqwest client, v3 API key or v4 token, `--tmdb-language` default `en-US`) has `search_movie`,
@@ -89,7 +90,8 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   `/tv/{id}/season/{n}/episode/{e}`), with no search and no Needs review. A Season gets name,
   description and poster, an Episode name, description, still, air date, TMDB id and imdbID. One
   TMDB does not know (404, common for specials) keeps its number as its name. While TMDB is
-  unavailable they are retried with the same backoff; when that runs out they keep their numbers.
+  unavailable they keep their numbers and are retried with the same backoff, hourly once it is
+  capped, until TMDB answers.
   One that appears later under a matched Show is looked up by the next pass, without searching the
   Show again. A Show in Needs review leaves its Seasons and Episodes unlooked-up until it has a
   Match.
@@ -259,7 +261,7 @@ stateDiagram-v2
 ```mermaid
 flowchart TB
     New["new Movie or Show<br/>(name + year from the folder)"] --> Search["TMDB search: name + year"]
-    Search -->|"TMDB down / rate limited"| Retry["retry with backoff, up to ~1 h<br/>parsed name shown meanwhile"] --> Search
+    Search -->|"TMDB down / rate limited"| Retry["retry with backoff, then hourly<br/>parsed name shown meanwhile"] --> Search
     Search -->|"exactly one result:<br/>same year, same name"| Match["Match: name, year, imdbID, TMDB id,<br/>description, poster"]
     Search -->|"none or several"| Review["Needs review<br/>top 5 candidates kept"]
     Review -->|"admin picks one"| Match

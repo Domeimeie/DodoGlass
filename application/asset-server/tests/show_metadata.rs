@@ -366,18 +366,30 @@ async fn while_tmdb_is_unreachable_the_show_lookup_is_retried_with_backoff() {
 }
 
 #[tokio::test]
-async fn after_about_an_hour_of_retries_the_show_needs_review() {
+async fn a_long_outage_keeps_the_show_retrying_hourly_and_out_of_review() {
     let app = TestApp::start().await;
+    add_breaking_bad(&app);
     app.tmdb.set_unreachable(true);
 
     ready_episode(&app, S01E02).await;
-    for _ in 0..18 {
+    for _ in 0..(12 * 6) {
         app.advance(Duration::from_secs(5 * 60));
         app.match_metadata().await;
     }
+    assert_eq!(
+        app.get_json("/admin/needs-review").await["shows"],
+        json!([]),
+        "an outage does not fill the review queue"
+    );
 
-    let review = app.get_json("/admin/needs-review").await;
-    assert_eq!(review["shows"][0]["name"], json!("Breaking Bad"));
+    app.tmdb.set_unreachable(false);
+    app.advance(Duration::from_secs(3600));
+    app.match_metadata().await;
+    assert_eq!(only_show(&app).await["tmdb_id"], json!(1396));
+    assert_eq!(
+        episodes(&app, 1).await[0]["name"],
+        json!("Cat's in the Bag...")
+    );
 }
 
 #[tokio::test]
@@ -400,26 +412,28 @@ async fn an_episode_whose_lookup_hits_an_outage_is_retried_then_filled_in() {
 }
 
 #[tokio::test]
-async fn an_episode_whose_retries_run_out_keeps_its_number_and_is_not_in_review() {
+async fn an_episode_keeps_its_number_through_a_long_outage_and_is_filled_in_after() {
     let app = TestApp::start().await;
     add_breaking_bad(&app);
     ready_episode(&app, S01E01).await;
     app.tmdb.set_unreachable(true);
 
     ready_episode(&app, S01E02).await;
-    for _ in 0..18 {
+    for _ in 0..(12 * 6) {
         app.advance(Duration::from_secs(5 * 60));
         app.match_metadata().await;
     }
-    app.tmdb.set_unreachable(false);
-    let calls = app.tmdb.calls();
-    app.advance(Duration::from_secs(3600));
-    app.match_metadata().await;
-
-    assert_eq!(app.tmdb.calls(), calls, "no more lookups");
     assert_eq!(episodes(&app, 1).await[1]["name"], json!("Episode 2"));
     assert_eq!(
         app.get_json("/admin/needs-review").await["shows"],
         json!([])
+    );
+
+    app.tmdb.set_unreachable(false);
+    app.advance(Duration::from_secs(3600));
+    app.match_metadata().await;
+    assert_eq!(
+        episodes(&app, 1).await[1]["name"],
+        json!("Cat's in the Bag...")
     );
 }

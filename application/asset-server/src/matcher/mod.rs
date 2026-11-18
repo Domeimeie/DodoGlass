@@ -7,8 +7,9 @@
 //!   ([`Catalogue::movie_matched`], [`Catalogue::show_matched`]).
 //! - Otherwise **Needs review**, with the top [`CANDIDATES`] results kept.
 //! - **TMDB unavailable** (down, rate limiting): retried with backoff
-//!   ([`RETRY_DELAYS`], about an hour in all), then Needs review. The entry
-//!   keeps its folder's name and year meanwhile.
+//!   ([`FIRST_RETRY`] doubling up to [`MAX_RETRY`]), then hourly for as long
+//!   as the outage lasts: an outage never fills Needs review. The entry keeps
+//!   its folder's name and year meanwhile.
 //! - **Seasons and Episodes** of a matched Show are looked up by number, with
 //!   no search: TMDB's answer, or nothing when it does not know them (their
 //!   number stays their name, they are not in Needs review). Retried with the
@@ -42,17 +43,12 @@ use crate::ports::tmdb::{MovieSummary, ShowSummary, Tmdb, TmdbError};
 /// How many search results a Movie in Needs review keeps.
 pub const CANDIDATES: usize = 5;
 
-/// The wait after each failed lookup in a row; after the last one the Movie
-/// goes to Needs review. 30 s doubling up to 32 min: about an hour in all.
-pub const RETRY_DELAYS: [Duration; 7] = [
-    Duration::from_secs(30),
-    Duration::from_secs(60),
-    Duration::from_secs(2 * 60),
-    Duration::from_secs(4 * 60),
-    Duration::from_secs(8 * 60),
-    Duration::from_secs(16 * 60),
-    Duration::from_secs(32 * 60),
-];
+/// The wait after the first failed lookup; it doubles with each one in a row.
+pub const FIRST_RETRY: Duration = Duration::from_secs(30);
+
+/// The longest wait between retries: an outage of any length is retried
+/// hourly, never sent to Needs review.
+pub const MAX_RETRY: Duration = Duration::from_secs(3600);
 
 #[derive(Clone)]
 pub struct Matcher {
@@ -67,12 +63,11 @@ enum Outcome<M> {
     NeedsReview(Vec<Candidate>),
 }
 
-/// How long to wait after `failed` lookups in a row; `None` once the
-/// retries ran out.
-fn retry_delay(failed: i32) -> Option<Duration> {
-    RETRY_DELAYS
-        .get(usize::try_from(failed).ok()?.checked_sub(1)?)
-        .copied()
+/// How long to wait after `failed` lookups in a row: [`FIRST_RETRY`],
+/// doubling, at most [`MAX_RETRY`].
+fn retry_delay(failed: i32) -> Duration {
+    let doublings = u32::try_from(failed.saturating_sub(1)).unwrap_or(0).min(16);
+    (FIRST_RETRY * 2u32.pow(doublings)).min(MAX_RETRY)
 }
 
 /// The one search result with exactly this name and year, or the top
@@ -141,18 +136,11 @@ impl Matcher {
             }
             Err(LookupError::Retry(e)) => {
                 let failed = lookup.failed_attempts + 1;
-                match retry_delay(failed) {
-                    Some(retry_in) => {
-                        warn!(movie, error = %e, retry_in_s = retry_in.as_secs(), "lookup failed, retrying");
-                        self.catalogue
-                            .movie_lookup_failed(movie, failed, retry_in)
-                            .await
-                    }
-                    None => {
-                        warn!(movie, error = %e, "lookup failed too often, needs review");
-                        self.catalogue.movie_needs_review(movie, Vec::new()).await
-                    }
-                }
+                let retry_in = retry_delay(failed);
+                warn!(movie, error = %e, retry_in_s = retry_in.as_secs(), "lookup failed, retrying");
+                self.catalogue
+                    .movie_lookup_failed(movie, failed, retry_in)
+                    .await
             }
             Err(LookupError::Review(e)) => {
                 warn!(movie, error = %e, "lookup failed, needs review");
@@ -208,18 +196,11 @@ impl Matcher {
             }
             Err(LookupError::Retry(e)) => {
                 let failed = lookup.failed_attempts + 1;
-                match retry_delay(failed) {
-                    Some(retry_in) => {
-                        warn!(show, error = %e, retry_in_s = retry_in.as_secs(), "show lookup failed, retrying");
-                        self.catalogue
-                            .show_lookup_failed(show, failed, retry_in)
-                            .await
-                    }
-                    None => {
-                        warn!(show, error = %e, "show lookup failed too often, needs review");
-                        self.catalogue.show_needs_review(show, Vec::new()).await
-                    }
-                }
+                let retry_in = retry_delay(failed);
+                warn!(show, error = %e, retry_in_s = retry_in.as_secs(), "show lookup failed, retrying");
+                self.catalogue
+                    .show_lookup_failed(show, failed, retry_in)
+                    .await
             }
             Err(LookupError::Review(e)) => {
                 warn!(show, error = %e, "show lookup failed, needs review");
@@ -281,21 +262,19 @@ impl Matcher {
                 }
             }
         };
-        let give_up = match outcome {
+        let refused = match outcome {
             LookupError::Retry(e) => {
                 let failed = pending.failed_attempts + 1;
-                if let Some(retry_in) = retry_delay(failed) {
-                    warn!(?part, error = %e, retry_in_s = retry_in.as_secs(), "lookup failed, retrying");
-                    return self
-                        .catalogue
-                        .part_lookup_failed(part, failed, retry_in)
-                        .await;
-                }
-                e
+                let retry_in = retry_delay(failed);
+                warn!(?part, error = %e, retry_in_s = retry_in.as_secs(), "lookup failed, retrying");
+                return self
+                    .catalogue
+                    .part_lookup_failed(part, failed, retry_in)
+                    .await;
             }
             LookupError::Review(e) => e,
         };
-        warn!(?part, error = %give_up, "lookup failed, keeping the number as the name");
+        warn!(?part, error = %refused, "lookup refused, keeping the number as the name");
         match part {
             Part::Season { season_id } => self.catalogue.season_looked_up(season_id, None).await,
             Part::Episode { episode_id, .. } => {
@@ -425,11 +404,12 @@ mod tests {
     }
 
     #[test]
-    fn retries_wait_longer_each_time_then_stop() {
-        assert_eq!(retry_delay(1), Some(Duration::from_secs(30)));
-        assert_eq!(retry_delay(7), Some(Duration::from_secs(32 * 60)));
-        assert_eq!(retry_delay(8), None);
-        assert_eq!(retry_delay(0), None);
+    fn retries_wait_longer_each_time_up_to_an_hour() {
+        assert_eq!(retry_delay(1), Duration::from_secs(30));
+        assert_eq!(retry_delay(2), Duration::from_secs(60));
+        assert_eq!(retry_delay(7), Duration::from_secs(32 * 60));
+        assert_eq!(retry_delay(8), Duration::from_secs(3600));
+        assert_eq!(retry_delay(1000), Duration::from_secs(3600));
     }
 
     #[test]
