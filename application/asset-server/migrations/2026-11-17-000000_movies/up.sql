@@ -1,7 +1,8 @@
 -- Movies and their Media files.
--- Portable SQL: SQLite and Postgres both accept every statement (ADR 0002).
--- Integer ids are `INTEGER PRIMARY KEY` (SQLite's auto-assigned rowid); the
--- move to Postgres rewrites them as identity columns.
+-- Portable SQL: SQLite and Postgres both accept every statement (ADR 0002),
+-- except that integer ids are `INTEGER PRIMARY KEY`, relying on SQLite's
+-- auto-assigned rowid: the one known rewrite for the move to Postgres (ADR
+-- 0002, Consequences).
 
 CREATE TABLE movie (
     id INTEGER PRIMARY KEY NOT NULL,
