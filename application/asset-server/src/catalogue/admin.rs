@@ -6,7 +6,7 @@ use diesel::prelude::*;
 
 use super::Catalogue;
 use super::media_files::{self, READY};
-use super::schema::media_file;
+use super::schema::{episode, media_file, movie, season, show};
 use crate::ports::storage::delete_output;
 
 /// The outcome of an admin change.
@@ -34,7 +34,172 @@ fn refused(message: &str) -> Result<Change> {
     Ok(Change::Refused(message.into()))
 }
 
+/// The rows an entry is made of: itself, what is below it, and the Media
+/// files of all of them.
+#[derive(Default)]
+struct Scope {
+    movie: Option<i32>,
+    show: Option<i32>,
+    seasons: Vec<i32>,
+    episodes: Vec<i32>,
+}
+
+/// The rows of `entry`; `None` if it does not exist.
+fn scope_of(conn: &mut SqliteConnection, entry: Entry) -> Result<Option<Scope>> {
+    let episodes_of = |conn: &mut SqliteConnection, seasons: &[i32]| -> Result<Vec<i32>> {
+        Ok(episode::table
+            .filter(episode::season_id.eq_any(seasons))
+            .select(episode::id)
+            .load(conn)?)
+    };
+    let season_of = |conn: &mut SqliteConnection, show: i32, number: i32| -> Result<Option<i32>> {
+        Ok(season::table
+            .filter(season::show_id.eq(show))
+            .filter(season::number.eq(number))
+            .select(season::id)
+            .first(conn)
+            .optional()?)
+    };
+    Ok(match entry {
+        Entry::Movie(id) => {
+            let found: Option<i32> = movie::table
+                .find(id)
+                .select(movie::id)
+                .first(conn)
+                .optional()?;
+            found.map(|id| Scope {
+                movie: Some(id),
+                ..Scope::default()
+            })
+        }
+        Entry::Show(id) => {
+            let found: Option<i32> = show::table
+                .find(id)
+                .select(show::id)
+                .first(conn)
+                .optional()?;
+            match found {
+                None => None,
+                Some(id) => {
+                    let seasons: Vec<i32> = season::table
+                        .filter(season::show_id.eq(id))
+                        .select(season::id)
+                        .load(conn)?;
+                    let episodes = episodes_of(conn, &seasons)?;
+                    Some(Scope {
+                        show: Some(id),
+                        seasons,
+                        episodes,
+                        ..Scope::default()
+                    })
+                }
+            }
+        }
+        Entry::Season { show, number } => match season_of(conn, show, number)? {
+            None => None,
+            Some(id) => Some(Scope {
+                episodes: episodes_of(conn, &[id])?,
+                seasons: vec![id],
+                ..Scope::default()
+            }),
+        },
+        Entry::Episode {
+            show,
+            season,
+            number,
+        } => {
+            let found: Option<i32> = match season_of(conn, show, season)? {
+                None => None,
+                Some(season) => episode::table
+                    .filter(episode::season_id.eq(season))
+                    .filter(episode::number.eq(number))
+                    .select(episode::id)
+                    .first(conn)
+                    .optional()?,
+            };
+            found.map(|id| Scope {
+                episodes: vec![id],
+                ..Scope::default()
+            })
+        }
+    })
+}
+
+impl Scope {
+    /// The Media files of the entry, with their states.
+    fn media_files(&self, conn: &mut SqliteConnection) -> Result<Vec<(String, String)>> {
+        let select = (media_file::id, media_file::state);
+        Ok(match self.movie {
+            Some(movie) => media_file::table
+                .filter(media_file::movie_id.eq(movie))
+                .select(select)
+                .load(conn)?,
+            None => media_file::table
+                .filter(media_file::episode_id.eq_any(&self.episodes))
+                .select(select)
+                .load(conn)?,
+        })
+    }
+
+    fn delete(&self, conn: &mut SqliteConnection) -> Result<()> {
+        if let Some(id) = self.movie {
+            diesel::delete(media_file::table.filter(media_file::movie_id.eq(id))).execute(conn)?;
+            // Its metadata and candidates go with it (ON DELETE CASCADE).
+            diesel::delete(movie::table.find(id)).execute(conn)?;
+        }
+        diesel::delete(media_file::table.filter(media_file::episode_id.eq_any(&self.episodes)))
+            .execute(conn)?;
+        diesel::delete(episode::table.filter(episode::id.eq_any(&self.episodes))).execute(conn)?;
+        diesel::delete(season::table.filter(season::id.eq_any(&self.seasons))).execute(conn)?;
+        if let Some(id) = self.show {
+            diesel::delete(show::table.find(id)).execute(conn)?;
+        }
+        Ok(())
+    }
+}
+
+const VISIBLE: &str = "only a Hidden entry can be deleted: it has a Ready Media file";
+
 impl Catalogue {
+    /// Deletes Hidden `entry` for good: with what is below it (Seasons,
+    /// Episodes), its metadata and its Media files with their output in
+    /// `final`. An entry that is not Hidden is refused.
+    pub async fn delete_hidden(&self, entry: Entry) -> Result<Change> {
+        let files = self
+            .db
+            .run(move |conn| {
+                let Some(scope) = scope_of(conn, entry)? else {
+                    return Ok(None);
+                };
+                Ok(Some(scope.media_files(conn)?))
+            })
+            .await?;
+        let Some(files) = files else {
+            return Ok(Change::NotFound);
+        };
+        if files.iter().any(|(_, state)| state == READY) {
+            return refused(VISIBLE);
+        }
+        for (id, _) in &files {
+            delete_output(self.final_.as_ref(), id).await?;
+        }
+        self.db
+            .run(move |conn| {
+                conn.transaction(|conn| {
+                    // Looked up again: something may have changed meanwhile.
+                    let Some(scope) = scope_of(conn, entry)? else {
+                        return Ok(Change::NotFound);
+                    };
+                    if scope.media_files(conn)?.iter().any(|(_, s)| s == READY) {
+                        return refused(VISIBLE);
+                    }
+                    scope.delete(conn)?;
+                    Ok(Change::Done)
+                })
+            })
+            .await
+    }
+
     /// Removes Media file `id`: its output in `final`, then its entry. Its
     /// Movie or Episode stays (Hidden if nothing Ready is left), and if it was
     /// the default, the oldest remaining Ready one takes over (or else the

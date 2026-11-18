@@ -32,7 +32,13 @@ async fn a_failed_status_makes_the_media_file_failed_with_its_error() {
 
     assert_eq!(
         app.get_json(&status_uri()).await,
-        json!({ "id": MATRIX_ID, "state": "failed", "error": "ffprobe: invalid data" })
+        json!({
+            "id": MATRIX_ID,
+            "key": MATRIX,
+            "label": "matrix",
+            "state": "failed",
+            "error": "ffprobe: invalid data",
+        })
     );
     assert_eq!(app.get_json("/movies").await, json!([]));
 }
@@ -128,6 +134,8 @@ async fn processing_for_more_than_24_hours_with_the_input_still_in_ingest_is_fai
         app.get_json(&status_uri()).await,
         json!({
             "id": MATRIX_ID,
+            "key": MATRIX,
+            "label": "matrix",
             "state": "failed",
             "error": "no output after 24 h while the input is still in ingest",
         })
@@ -209,7 +217,13 @@ async fn uploading_a_failed_media_file_again_makes_it_processing() {
 
     assert_eq!(
         app.get_json(&status_uri()).await,
-        json!({ "id": MATRIX_ID, "state": "processing", "error": null })
+        json!({
+            "id": MATRIX_ID,
+            "key": MATRIX,
+            "label": "matrix",
+            "state": "processing",
+            "error": null,
+        })
     );
     app.finish_transcode(MATRIX).await;
     app.send_completed(MATRIX).await;
@@ -229,6 +243,7 @@ async fn an_output_marker_with_no_known_media_file_is_placed_as_ready() {
     assert_eq!(
         app.get_json("/movies").await,
         json!([{
+            "id": 1,
             "name": "The Matrix",
             "year": 1999,
             "media_files": [{

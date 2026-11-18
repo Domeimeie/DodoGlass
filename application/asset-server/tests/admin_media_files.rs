@@ -358,3 +358,123 @@ async fn a_movie_whose_last_media_file_was_removed_is_hidden_and_comes_back_with
     assert_eq!(default_of(listed).as_deref(), Some("matrix-directors-cut"));
     assert_eq!(app.tmdb.calls(), calls, "no new lookup: the Movie was kept");
 }
+
+// --- deleting Hidden entries ------------------------------------------------
+
+const PILOT_2: &str = "shows/Breaking Bad (2008)/Season 01/S01E02.mkv";
+const SEASON_2: &str = "shows/Breaking Bad (2008)/Season 02/S02E01.mkv";
+
+#[tokio::test]
+async fn deleting_a_hidden_movie_removes_it_for_good() {
+    let app = TestApp::start().await;
+    app.tmdb.add_movie(movie(603, "The Matrix", 1999));
+    upload_ready(&app, MATRIX).await;
+    app.match_metadata().await;
+    let movie_id = app.get_json("/movies").await[0]["id"].clone();
+    delete(&app, &uri(MATRIX)).await;
+    let calls = app.tmdb.calls();
+
+    let status = delete(&app, &format!("/admin/movies/{movie_id}")).await;
+
+    assert_eq!(status, 204);
+    assert_eq!(
+        delete(&app, &format!("/admin/movies/{movie_id}")).await,
+        404
+    );
+    // A new upload to the same folder is a new Movie, looked up again.
+    upload_ready(&app, MATRIX).await;
+    app.match_metadata().await;
+    assert!(app.tmdb.calls() > calls);
+}
+
+#[tokio::test]
+async fn deleting_a_visible_movie_is_refused() {
+    let app = TestApp::start().await;
+    upload_ready(&app, MATRIX).await;
+    let movie_id = app.get_json("/movies").await[0]["id"].clone();
+
+    let status = delete(&app, &format!("/admin/movies/{movie_id}")).await;
+
+    assert_eq!(status, 409);
+    assert_eq!(labels(&app).await, vec!["matrix"]);
+}
+
+#[tokio::test]
+async fn deleting_a_hidden_movie_removes_its_media_files_and_their_output() {
+    let app = TestApp::start().await;
+    upload_ready(&app, MATRIX).await;
+    let movie_id = app.get_json("/movies").await[0]["id"].clone();
+    lose_output(&app, MATRIX).await;
+    app.reconcile().await; // Missing: the Movie is Hidden
+    app.put(
+        &app.buckets.final_,
+        &format!("{}/hls/leftover.ts", id(MATRIX)),
+        b"x",
+    )
+    .await;
+
+    let status = delete(&app, &format!("/admin/movies/{movie_id}")).await;
+
+    assert_eq!(status, 204);
+    assert_eq!(app.get(&uri(MATRIX)).await.0, 404);
+    assert_eq!(outputs(&app, MATRIX).await, Vec::<String>::new());
+}
+
+/// The id of the first listed Show.
+async fn show_id(app: &TestApp) -> Value {
+    app.get_json("/shows").await[0]["id"].clone()
+}
+
+#[tokio::test]
+async fn deleting_a_hidden_episode_of_a_visible_season() {
+    let app = TestApp::start().await;
+    upload_ready(&app, PILOT).await;
+    app.upload(PILOT_2).await;
+    app.fail_transcode(PILOT_2, "ffmpeg exited with 1").await;
+    let show = show_id(&app).await;
+    let episode = |n: u32| format!("/admin/shows/{show}/seasons/1/episodes/{n}");
+
+    assert_eq!(delete(&app, &episode(1)).await, 409);
+    assert_eq!(delete(&app, &episode(2)).await, 204);
+    assert_eq!(delete(&app, &episode(2)).await, 404);
+    assert_eq!(app.get(&uri(PILOT_2)).await.0, 404);
+    assert_eq!(app.get(&uri(PILOT)).await.0, 200);
+}
+
+#[tokio::test]
+async fn deleting_a_hidden_season_of_a_visible_show() {
+    let app = TestApp::start().await;
+    upload_ready(&app, PILOT).await;
+    app.upload(SEASON_2).await;
+    let show = show_id(&app).await;
+
+    assert_eq!(
+        delete(&app, &format!("/admin/shows/{show}/seasons/1")).await,
+        409
+    );
+    assert_eq!(
+        delete(&app, &format!("/admin/shows/{show}/seasons/2")).await,
+        204
+    );
+    assert_eq!(app.get(&uri(SEASON_2)).await.0, 404);
+    assert_eq!(
+        app.get_json(&format!("/shows/{show}/seasons")).await,
+        json!([{ "number": 1 }])
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_hidden_show_removes_its_seasons_episodes_and_media_files() {
+    let app = TestApp::start().await;
+    upload_ready(&app, PILOT).await;
+    app.upload(SEASON_2).await;
+    let show = show_id(&app).await;
+    assert_eq!(delete(&app, &format!("/admin/shows/{show}")).await, 409);
+
+    delete(&app, &uri(PILOT)).await;
+    let status = delete(&app, &format!("/admin/shows/{show}")).await;
+
+    assert_eq!(status, 204);
+    assert_eq!(app.get(&uri(SEASON_2)).await.0, 404);
+    assert_eq!(delete(&app, &format!("/admin/shows/{show}")).await, 404);
+}

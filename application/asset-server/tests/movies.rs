@@ -20,6 +20,7 @@ async fn a_movie_upload_is_listed_once_its_transcode_is_ready() {
     assert_eq!(
         app.get_json("/movies").await,
         json!([{
+            "id": 1,
             "name": "The Matrix",
             "year": 1999,
             "media_files": [{
@@ -115,6 +116,7 @@ async fn nfc_and_nfd_spellings_of_a_path_are_the_same_movie() {
     assert_eq!(
         app.get_json("/movies").await,
         json!([{
+            "id": 1,
             "name": "Am\u{e9}lie",
             "year": 2001,
             "media_files": [{
