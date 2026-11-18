@@ -38,7 +38,7 @@ Other tasks (from this folder): `go-task test`, `go-task lint`, `go-task fmt`, `
 | Module | What it does |
 |---|---|
 | `catalogue/` | The core: placing uploads (`placement.rs`), Media file states, Labels and the Default media file per owner (`media_files.rs`), Movies and what viewers see (`movies.rs`), Shows, Seasons and Episodes (`shows.rs`), Unassigned media files and attaching them (`unassigned.rs`), TMDB outcomes (`match_state.rs`: the `MatchState` of an entry) and Locked fields of Movies (`metadata.rs`) and of Shows, Seasons and Episodes (`show_metadata.rs`), fields edited by hand (locking them), unlocking, and what a picked Match or refresh applies to (`corrections.rs`), the admin's changes: default, Labels, removing Media files, deleting Hidden entries (`admin.rs`). Everything else goes through it |
-| `ports/` | Upload events (`upload_events.rs`, MQTT in `mqtt.rs`), status hints (`status_hints.rs`, MQTT in `mqtt_status.rs`), buckets (`storage.rs`), the clock (`clock.rs`), TMDB (`tmdb.rs`: the `Tmdb` trait and the reqwest client) |
+| `ports/` | Upload events (`upload_events.rs`, MQTT in `mqtt.rs`), status hints (`status_hints.rs`, MQTT in `mqtt_status.rs`; both MQTT connections in `mqtt_client.rs`), buckets (`storage.rs`), the clock (`clock.rs`), TMDB (`tmdb.rs`: the `Tmdb` trait and the reqwest client) |
 | `ingest/` | The ingest listener: S3 events → `Catalogue::upload_seen`, ack after storing |
 | `reconcile.rs` | Output markers in `final` → Ready, Missing, Failed after 24 h; unseen outputs placed from their marker |
 | `status.rs` | The status listener: `completed` → early reconcile of that Media file, `failed` → Failed |

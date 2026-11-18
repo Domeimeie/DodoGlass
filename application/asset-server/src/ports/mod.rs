@@ -6,10 +6,11 @@
 //! - [`clock`]: the current time;
 //! - [`tmdb`]: TMDB, where descriptive information comes from;
 //! - [`status_hints`]: the transcoder's status messages (MQTT in production,
-//!   [`mqtt_status`]).
+//!   [`mqtt_status`]); both MQTT connections share `mqtt_client`.
 
 pub mod clock;
 pub mod mqtt;
+mod mqtt_client;
 pub mod mqtt_status;
 pub mod status_hints;
 pub mod storage;
