@@ -1,9 +1,12 @@
 //! What the transcoder and the asset server both read from an upload key:
 //! the task id, which both must derive the same way (ADR 0004), and where the
-//! upload belongs in the catalogue (ADR 0003).
+//! upload belongs in the catalogue (ADR 0003); and the output marker
+//! `source.json` the transcoder writes and both read (ADR 0001).
 
+mod output_marker;
 mod upload_path;
 
+pub use output_marker::{OutputMarker, SourceObject};
 pub use upload_path::{Placement, UnassignedReason, place_upload};
 
 use sha2::{Digest, Sha256};

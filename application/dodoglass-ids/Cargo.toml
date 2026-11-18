@@ -2,8 +2,9 @@
 name = "dodoglass-ids"
 version = "0.1.0"
 edition = "2024"
-description = "Task ids and upload path placement shared by the transcoder and the asset server"
+description = "Task ids, upload path placement and the output marker shared by the transcoder and the asset server"
 
 [dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.10.9"
 unicode-normalization = "0.1"

@@ -19,7 +19,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
-use serde::Deserialize;
 use tracing::{info, warn};
 
 use crate::catalogue::{Catalogue, Manifests, MediaFileState, TIMED_OUT, TrackedMediaFile};
@@ -33,14 +32,10 @@ pub struct Reconciler {
     final_bucket: String,
 }
 
-/// The parts of `source.json` the asset server reads.
-#[derive(Deserialize)]
-struct OutputMarker {
-    formats: Vec<String>,
-    /// `{"bucket", "key"}` of the input; read only for unknown folders.
-    #[serde(default)]
-    input: serde_json::Value,
-}
+/// `source.json`, as the transcoder writes it (schema shared through
+/// `dodoglass-ids`). The asset server reads its formats, and its input key
+/// for folders it does not know.
+type OutputMarker = dodoglass_ids::OutputMarker<String>;
 
 impl Reconciler {
     pub fn new(
@@ -119,9 +114,7 @@ impl Reconciler {
         let Some(marker) = self.marker(id).await? else {
             return Ok(());
         };
-        let key = marker.input["key"]
-            .as_str()
-            .context("source.json has no input key")?;
+        let key = marker.input.key.as_str();
         if dodoglass_ids::task_id_from_key(key) != id {
             warn!(folder = %id, %key, "source.json input key does not match its folder");
             return Ok(());

@@ -380,7 +380,7 @@ Label, remove a Media file, refresh.
 | Where | Change |
 |---|---|
 | Transcoder | task id = readable prefix + 8 hex of SHA-256 over the NFC-normalised key (ADR 0004), moved into a shared crate |
-| Transcoder | `source.json` stores `input` as `{"bucket": …, "key": …}` |
+| Transcoder | `source.json` stores `input` as `{"bucket": …, "key": …}`; its schema (`OutputMarker`) moved into the shared crate, so both read and write the same type |
 | `infra/init.sh` | creates the bucket `assets` |
 | `final` bucket | existing outputs deleted and re-uploaded (new ids, no migration) |
 

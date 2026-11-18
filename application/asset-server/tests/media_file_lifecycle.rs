@@ -303,7 +303,10 @@ async fn a_folder_whose_marker_names_the_key_of_another_folder_is_not_placed() {
     let app = TestApp::start().await;
     let marker = json!({
         "input": { "bucket": "ingest", "key": MATRIX },
+        "etag": "e1",
         "formats": ["hls"],
+        "completed_ms": 1,
+        "worker": "w",
     });
     app.put(
         &app.buckets.final_,

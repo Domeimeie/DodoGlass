@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use dodoglass_ids::{OutputMarker, SourceObject};
 use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tracing::{Instrument, debug, error, info, info_span, warn};
@@ -84,37 +84,8 @@ impl Context {
 /// version (same eTag) and formats is then skipped. The asset server reads it
 /// too, to learn which upload an output belongs to.
 ///
-/// ```json
-/// {"input": {"bucket": "ingest", "key": "sample.mp4"}, "etag": "…",
-///  "formats": ["hls", "dash"], "completed_ms": 1793128170038, "worker": "worker-1"}
-/// ```
-#[derive(Debug, Serialize, Deserialize)]
-struct SourceMarker {
-    input: SourceObject,
-    etag: String,
-    formats: Vec<Format>,
-    completed_ms: u64,
-    worker: String,
-}
-
-/// The object an output was made from.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
-struct SourceObject {
-    bucket: String,
-    key: String,
-}
-
-impl SourceMarker {
-    /// Whether this output was made from exactly this version of this object,
-    /// in these formats, so transcoding it again would change nothing. The NFC
-    /// and NFD spellings of a key are the same video (same id, ADR 0004).
-    fn describes(&self, bucket: &str, key: &str, etag: &str, formats: &[Format]) -> bool {
-        self.input.bucket == bucket
-            && dodoglass_ids::same_key(&self.input.key, key)
-            && self.etag == etag
-            && self.formats == formats
-    }
-}
+/// The schema is shared with the asset server ([`OutputMarker`]).
+type SourceMarker = OutputMarker<Format>;
 
 const SOURCE_MARKER: &str = "source.json";
 
