@@ -9,13 +9,16 @@
 //! - [`shows`]: Shows, Seasons and Episodes, and what viewers see of them;
 //! - [`unassigned`]: Unassigned media files, and attaching them;
 //! - [`metadata`]: what TMDB lookups found (Match, Needs review, retries)
-//!   and Locked fields.
+//!   and Locked fields of Movies;
+//! - [`show_metadata`]: the same for Shows, and their Seasons and Episodes
+//!   looked up by number.
 
 mod media_files;
 mod metadata;
 mod movies;
 mod placement;
 pub(crate) mod schema;
+mod show_metadata;
 mod shows;
 mod unassigned;
 
@@ -32,6 +35,10 @@ pub use metadata::{
     PendingLookup,
 };
 pub use movies::{MediaFileView, MovieView};
+pub use show_metadata::{
+    EPISODE_LOCKABLE_FIELDS, EpisodeMatch, NeedsReviewShow, Part, PendingPart, PendingShowLookup,
+    SEASON_LOCKABLE_FIELDS, SHOW_LOCKABLE_FIELDS, SeasonMatch, ShowMatch, ShowMetadataView,
+};
 pub use shows::{EpisodeView, SeasonView, ShowView};
 pub use unassigned::{AttachTo, Attached, UnassignedView};
 

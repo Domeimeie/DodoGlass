@@ -2,8 +2,8 @@
 //!
 //! [`Tmdb`] is the port: one method per TMDB call the asset server makes.
 //! [`TmdbClient`] is the real one (TMDB's v3 API over HTTPS); the tests use
-//! an in-memory fake. Shows, Seasons and Episodes add their own calls here
-//! (`search_tv`, `tv`, `season`, `episode`) next to the Movie ones.
+//! an in-memory fake. Movies have `search_movie` and `movie`; Shows,
+//! Seasons and Episodes `search_tv`, `tv`, `season` and `episode`.
 //!
 //! Errors say whether trying again later can help ([`TmdbError::Unavailable`]:
 //! TMDB unreachable, rate limiting or failing) or not ([`TmdbError::Rejected`]).
@@ -38,6 +38,49 @@ pub struct MovieDetails {
     pub poster_path: Option<String>,
 }
 
+/// A Show as TMDB's search lists it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShowSummary {
+    pub tmdb_id: i64,
+    pub name: String,
+    /// The year of the first air date; `None` when TMDB has no date.
+    pub year: Option<i32>,
+    pub overview: Option<String>,
+    pub poster_path: Option<String>,
+}
+
+/// A Show with everything the catalogue takes from TMDB.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShowDetails {
+    pub tmdb_id: i64,
+    pub name: String,
+    pub year: Option<i32>,
+    pub imdb_id: Option<String>,
+    pub overview: Option<String>,
+    pub poster_path: Option<String>,
+}
+
+/// A Season with everything the catalogue takes from TMDB.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeasonDetails {
+    pub name: Option<String>,
+    pub overview: Option<String>,
+    pub poster_path: Option<String>,
+}
+
+/// An Episode with everything the catalogue takes from TMDB.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpisodeDetails {
+    pub tmdb_id: i64,
+    pub name: Option<String>,
+    pub overview: Option<String>,
+    /// TMDB's image path of the still (`/abc.jpg`).
+    pub still_path: Option<String>,
+    /// ISO date, `2008-01-27`.
+    pub air_date: Option<String>,
+    pub imdb_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TmdbError {
     /// Unreachable, rate limiting (429) or failing (5xx): worth retrying later.
@@ -65,6 +108,24 @@ pub trait Tmdb: Send + Sync + 'static {
     /// The Movie with TMDB id `tmdb_id`.
     async fn movie(&self, tmdb_id: i64) -> Result<MovieDetails, TmdbError>;
 
+    /// Shows whose name matches `name`, first aired in `year`, in TMDB's order.
+    async fn search_tv(&self, name: &str, year: i32) -> Result<Vec<ShowSummary>, TmdbError>;
+
+    /// The Show with TMDB id `tmdb_id`.
+    async fn tv(&self, tmdb_id: i64) -> Result<ShowDetails, TmdbError>;
+
+    /// Season `number` of Show `tv_id`; `None` if TMDB does not know it.
+    async fn season(&self, tv_id: i64, number: i32) -> Result<Option<SeasonDetails>, TmdbError>;
+
+    /// Episode `episode` of Season `season` of Show `tv_id`; `None` if TMDB
+    /// does not know it.
+    async fn episode(
+        &self,
+        tv_id: i64,
+        season: i32,
+        episode: i32,
+    ) -> Result<Option<EpisodeDetails>, TmdbError>;
+
     /// The image at `path` (`/abc.jpg`) in its original size.
     async fn image(&self, path: &str) -> Result<Vec<u8>, TmdbError>;
 }
@@ -80,6 +141,22 @@ impl Tmdb for NoTmdb {
     }
 
     async fn movie(&self, _: i64) -> Result<MovieDetails, TmdbError> {
+        Err(TmdbError::Unavailable("no TMDB API key".into()))
+    }
+
+    async fn search_tv(&self, _: &str, _: i32) -> Result<Vec<ShowSummary>, TmdbError> {
+        Err(TmdbError::Unavailable("no TMDB API key".into()))
+    }
+
+    async fn tv(&self, _: i64) -> Result<ShowDetails, TmdbError> {
+        Err(TmdbError::Unavailable("no TMDB API key".into()))
+    }
+
+    async fn season(&self, _: i64, _: i32) -> Result<Option<SeasonDetails>, TmdbError> {
+        Err(TmdbError::Unavailable("no TMDB API key".into()))
+    }
+
+    async fn episode(&self, _: i64, _: i32, _: i32) -> Result<Option<EpisodeDetails>, TmdbError> {
         Err(TmdbError::Unavailable("no TMDB API key".into()))
     }
 
@@ -141,6 +218,17 @@ impl TmdbClient {
         path: &str,
         params: &[(&str, &str)],
     ) -> Result<T, TmdbError> {
+        self.get_json_found(path, params)
+            .await?
+            .ok_or_else(|| TmdbError::Rejected(format!("{path}: {}", StatusCode::NOT_FOUND)))
+    }
+
+    /// As [`Self::get_json`], with TMDB's "not found" (404) as `None`.
+    async fn get_json_found<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        params: &[(&str, &str)],
+    ) -> Result<Option<T>, TmdbError> {
         let mut url = Url::parse(&format!("{}{path}", self.settings.api_url))
             .map_err(|e| TmdbError::Rejected(format!("bad URL: {e}")))?;
         {
@@ -157,14 +245,27 @@ impl TmdbClient {
         if self.is_bearer_token() {
             request = request.bearer_auth(&self.settings.api_key);
         }
-        let bytes = send(request, path).await?;
+        let Some(bytes) = send_found(request, path).await? else {
+            return Ok(None);
+        };
         serde_json::from_slice(&bytes)
+            .map(Some)
             .map_err(|e| TmdbError::Rejected(format!("{path}: unexpected answer: {e}")))
     }
 }
 
 /// Sends `request`; the body of a 2xx answer, or the error it means.
 async fn send(request: reqwest::RequestBuilder, what: &str) -> Result<Vec<u8>, TmdbError> {
+    send_found(request, what)
+        .await?
+        .ok_or_else(|| TmdbError::Rejected(format!("{what}: {}", StatusCode::NOT_FOUND)))
+}
+
+/// As [`send`], with a 404 as `None`.
+async fn send_found(
+    request: reqwest::RequestBuilder,
+    what: &str,
+) -> Result<Option<Vec<u8>>, TmdbError> {
     let response = request
         .send()
         .await
@@ -173,6 +274,9 @@ async fn send(request: reqwest::RequestBuilder, what: &str) -> Result<Vec<u8>, T
     if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
         return Err(TmdbError::Unavailable(format!("{what}: {status}")));
     }
+    if status == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
     if !status.is_success() {
         return Err(TmdbError::Rejected(format!("{what}: {status}")));
     }
@@ -180,7 +284,7 @@ async fn send(request: reqwest::RequestBuilder, what: &str) -> Result<Vec<u8>, T
         .bytes()
         .await
         .map_err(|e| TmdbError::Unavailable(format!("{what}: {e}")))?;
-    Ok(bytes.to_vec())
+    Ok(Some(bytes.to_vec()))
 }
 
 #[derive(Deserialize)]
@@ -209,6 +313,78 @@ fn year_of(date: Option<&str>) -> Option<i32> {
 
 fn non_empty(s: Option<String>) -> Option<String> {
     s.filter(|s| !s.trim().is_empty())
+}
+
+#[derive(Deserialize, Default)]
+struct ExternalIdsJson {
+    #[serde(default)]
+    imdb_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ShowJson {
+    id: i64,
+    name: String,
+    #[serde(default)]
+    first_air_date: Option<String>,
+    #[serde(default)]
+    overview: Option<String>,
+    #[serde(default)]
+    poster_path: Option<String>,
+    /// Only with `append_to_response=external_ids`.
+    #[serde(default)]
+    external_ids: Option<ExternalIdsJson>,
+}
+
+impl From<ShowJson> for ShowDetails {
+    fn from(s: ShowJson) -> Self {
+        ShowDetails {
+            tmdb_id: s.id,
+            name: s.name,
+            year: year_of(s.first_air_date.as_deref()),
+            imdb_id: non_empty(s.external_ids.unwrap_or_default().imdb_id),
+            overview: non_empty(s.overview),
+            poster_path: non_empty(s.poster_path),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SeasonJson {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    overview: Option<String>,
+    #[serde(default)]
+    poster_path: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct EpisodeJson {
+    id: i64,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    overview: Option<String>,
+    #[serde(default)]
+    still_path: Option<String>,
+    #[serde(default)]
+    air_date: Option<String>,
+    #[serde(default)]
+    external_ids: Option<ExternalIdsJson>,
+}
+
+impl From<EpisodeJson> for EpisodeDetails {
+    fn from(e: EpisodeJson) -> Self {
+        EpisodeDetails {
+            tmdb_id: e.id,
+            name: non_empty(e.name),
+            overview: non_empty(e.overview),
+            still_path: non_empty(e.still_path),
+            air_date: non_empty(e.air_date),
+            imdb_id: non_empty(e.external_ids.unwrap_or_default().imdb_id),
+        }
+    }
 }
 
 impl From<MovieJson> for MovieDetails {
@@ -255,6 +431,70 @@ impl Tmdb for TmdbClient {
         Ok(movie.into())
     }
 
+    async fn search_tv(&self, name: &str, year: i32) -> Result<Vec<ShowSummary>, TmdbError> {
+        let year = year.to_string();
+        let answer: SearchAnswer<ShowJson> = self
+            .get_json(
+                "/search/tv",
+                &[
+                    ("query", name),
+                    ("first_air_date_year", &year),
+                    ("include_adult", "false"),
+                ],
+            )
+            .await?;
+        Ok(answer
+            .results
+            .into_iter()
+            .map(|s| {
+                let s = ShowDetails::from(s);
+                ShowSummary {
+                    tmdb_id: s.tmdb_id,
+                    name: s.name,
+                    year: s.year,
+                    overview: s.overview,
+                    poster_path: s.poster_path,
+                }
+            })
+            .collect())
+    }
+
+    async fn tv(&self, tmdb_id: i64) -> Result<ShowDetails, TmdbError> {
+        let show: ShowJson = self
+            .get_json(
+                &format!("/tv/{tmdb_id}"),
+                &[("append_to_response", "external_ids")],
+            )
+            .await?;
+        Ok(show.into())
+    }
+
+    async fn season(&self, tv_id: i64, number: i32) -> Result<Option<SeasonDetails>, TmdbError> {
+        let season: Option<SeasonJson> = self
+            .get_json_found(&format!("/tv/{tv_id}/season/{number}"), &[])
+            .await?;
+        Ok(season.map(|s| SeasonDetails {
+            name: non_empty(s.name),
+            overview: non_empty(s.overview),
+            poster_path: non_empty(s.poster_path),
+        }))
+    }
+
+    async fn episode(
+        &self,
+        tv_id: i64,
+        season: i32,
+        episode: i32,
+    ) -> Result<Option<EpisodeDetails>, TmdbError> {
+        let episode: Option<EpisodeJson> = self
+            .get_json_found(
+                &format!("/tv/{tv_id}/season/{season}/episode/{episode}"),
+                &[("append_to_response", "external_ids")],
+            )
+            .await?;
+        Ok(episode.map(EpisodeDetails::from))
+    }
+
     async fn image(&self, path: &str) -> Result<Vec<u8>, TmdbError> {
         if !path.starts_with('/') || path.contains("..") {
             return Err(TmdbError::Rejected(format!("bad image path {path:?}")));
@@ -273,6 +513,23 @@ mod tests {
         assert_eq!(year_of(Some("1999-03-30")), Some(1999));
         assert_eq!(year_of(Some("")), None);
         assert_eq!(year_of(None), None);
+    }
+
+    #[test]
+    fn imdb_ids_of_shows_and_episodes_come_from_external_ids() {
+        let show = r#"{"id": 1396, "name": "Breaking Bad", "first_air_date": "2008-01-20",
+            "overview": "", "poster_path": "/p.jpg", "external_ids": {"imdb_id": "tt0903747"}}"#;
+        let show = ShowDetails::from(serde_json::from_str::<ShowJson>(show).unwrap());
+        assert_eq!(show.year, Some(2008));
+        assert_eq!(show.imdb_id.as_deref(), Some("tt0903747"));
+        assert_eq!(show.overview, None);
+
+        let episode = r#"{"id": 62086, "name": "Cat's in the Bag...", "air_date": "2008-01-27",
+            "still_path": null, "external_ids": {"imdb_id": "tt1054724"}}"#;
+        let episode = EpisodeDetails::from(serde_json::from_str::<EpisodeJson>(episode).unwrap());
+        assert_eq!(episode.imdb_id.as_deref(), Some("tt1054724"));
+        assert_eq!(episode.air_date.as_deref(), Some("2008-01-27"));
+        assert_eq!(episode.still_path, None);
     }
 
     #[test]

@@ -111,8 +111,8 @@ async fn spider_man_and_spider_dash_man_are_the_same_name() {
     assert_eq!(listed["name"], json!("Spider-Man"));
     assert_eq!(listed["tmdb_id"], json!(557));
     assert_eq!(
-        app.get_json("/admin/needs-review").await,
-        json!({"movies": []})
+        app.get_json("/admin/needs-review").await["movies"],
+        json!([])
     );
 }
 

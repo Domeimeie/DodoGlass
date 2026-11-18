@@ -92,3 +92,81 @@ diesel::joinable!(movie_candidate -> movie (movie_id));
 diesel::allow_tables_to_appear_in_same_query!(movie, movie_metadata, movie_candidate);
 diesel::allow_tables_to_appear_in_same_query!(media_file, movie_metadata);
 diesel::allow_tables_to_appear_in_same_query!(media_file, movie_candidate);
+
+diesel::table! {
+    show_metadata (show_id) {
+        show_id -> Integer,
+        match_state -> Text,
+        lookup_attempts -> Integer,
+        retry_at_ms -> Nullable<BigInt>,
+        tmdb_id -> Nullable<BigInt>,
+        imdb_id -> Nullable<Text>,
+        description -> Nullable<Text>,
+        image_key -> Nullable<Text>,
+        locked_fields -> Text,
+    }
+}
+
+diesel::table! {
+    show_candidate (show_id, position) {
+        show_id -> Integer,
+        position -> Integer,
+        tmdb_id -> BigInt,
+        name -> Text,
+        year -> Nullable<Integer>,
+        description -> Nullable<Text>,
+        poster_path -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    season_metadata (season_id) {
+        season_id -> Integer,
+        match_state -> Text,
+        lookup_attempts -> Integer,
+        retry_at_ms -> Nullable<BigInt>,
+        name -> Nullable<Text>,
+        description -> Nullable<Text>,
+        image_key -> Nullable<Text>,
+        locked_fields -> Text,
+    }
+}
+
+diesel::table! {
+    episode_metadata (episode_id) {
+        episode_id -> Integer,
+        match_state -> Text,
+        lookup_attempts -> Integer,
+        retry_at_ms -> Nullable<BigInt>,
+        tmdb_id -> Nullable<BigInt>,
+        name -> Nullable<Text>,
+        description -> Nullable<Text>,
+        image_key -> Nullable<Text>,
+        air_date -> Nullable<Text>,
+        imdb_id -> Nullable<Text>,
+        locked_fields -> Text,
+    }
+}
+
+diesel::joinable!(show_metadata -> show (show_id));
+diesel::joinable!(show_candidate -> show (show_id));
+diesel::joinable!(season_metadata -> season (season_id));
+diesel::joinable!(episode_metadata -> episode (episode_id));
+diesel::allow_tables_to_appear_in_same_query!(
+    show,
+    show_metadata,
+    show_candidate,
+    season_metadata,
+    episode_metadata,
+);
+diesel::allow_tables_to_appear_in_same_query!(season, show_metadata);
+diesel::allow_tables_to_appear_in_same_query!(season, show_candidate);
+diesel::allow_tables_to_appear_in_same_query!(season, season_metadata);
+diesel::allow_tables_to_appear_in_same_query!(season, episode_metadata);
+diesel::allow_tables_to_appear_in_same_query!(episode, show_metadata);
+diesel::allow_tables_to_appear_in_same_query!(episode, show_candidate);
+diesel::allow_tables_to_appear_in_same_query!(episode, season_metadata);
+diesel::allow_tables_to_appear_in_same_query!(episode, episode_metadata);
+diesel::allow_tables_to_appear_in_same_query!(media_file, show_metadata);
+diesel::allow_tables_to_appear_in_same_query!(media_file, season_metadata);
+diesel::allow_tables_to_appear_in_same_query!(media_file, episode_metadata);

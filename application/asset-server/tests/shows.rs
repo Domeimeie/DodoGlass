@@ -38,13 +38,14 @@ async fn an_episode_upload_builds_its_show_season_and_episode() {
     );
     assert_eq!(
         app.get_json(&format!("/shows/{show}/seasons")).await,
-        json!([{ "number": 1 }])
+        json!([{ "number": 1, "name": "Season 1" }])
     );
     assert_eq!(
         app.get_json(&format!("/shows/{show}/seasons/1/episodes"))
             .await,
         json!([{
             "number": 2,
+            "name": "Episode 2",
             "media_files": [{
                 "id": S01E02_ID,
                 "label": "S01E02",
@@ -67,7 +68,7 @@ async fn specials_are_season_0() {
     let show = only_show_id(&app).await;
     assert_eq!(
         app.get_json(&format!("/shows/{show}/seasons")).await,
-        json!([{ "number": 0 }])
+        json!([{ "number": 0, "name": "Specials" }])
     );
     let episodes = app
         .get_json(&format!("/shows/{show}/seasons/0/episodes"))
@@ -90,7 +91,10 @@ async fn episodes_of_one_show_and_season_share_them() {
     let show = only_show_id(&app).await;
     assert_eq!(
         app.get_json(&format!("/shows/{show}/seasons")).await,
-        json!([{ "number": 1 }, { "number": 2 }])
+        json!([
+            { "number": 1, "name": "Season 1" },
+            { "number": 2, "name": "Season 2" },
+        ])
     );
     let episodes = app
         .get_json(&format!("/shows/{show}/seasons/1/episodes"))
@@ -148,7 +152,7 @@ async fn a_season_without_a_visible_episode_is_hidden() {
     let show = only_show_id(&app).await;
     assert_eq!(
         app.get_json(&format!("/shows/{show}/seasons")).await,
-        json!([{ "number": 1 }])
+        json!([{ "number": 1, "name": "Season 1" }])
     );
     let (status, _) = app.get(&format!("/shows/{show}/seasons/2/episodes")).await;
     assert_eq!(status, 404);
