@@ -17,7 +17,9 @@ use super::metadata::{LOCKABLE_FIELDS, LockedFields, PendingLookup};
 use super::schema::{
     episode, episode_metadata, movie, movie_metadata, season, season_metadata, show, show_metadata,
 };
-use super::show_metadata::{EPISODE_LOCKABLE_FIELDS, SEASON_LOCKABLE_FIELDS, SHOW_LOCKABLE_FIELDS};
+use super::show_metadata::{
+    EPISODE_LOCKABLE_FIELDS, PendingShowLookup, SEASON_LOCKABLE_FIELDS, SHOW_LOCKABLE_FIELDS,
+};
 
 const MATCHED: &str = "matched";
 const RETRYING: &str = "retrying";
@@ -30,6 +32,25 @@ const DUE: Option<i64> = Some(0);
 pub struct MovieLookup {
     pub lookup: PendingLookup,
     pub tmdb_id: Option<i64>,
+}
+
+/// A Show as a refresh or a picked Match needs it, as [`MovieLookup`].
+#[derive(Debug, Clone)]
+pub struct ShowLookup {
+    pub lookup: PendingShowLookup,
+    pub tmdb_id: Option<i64>,
+}
+
+/// What came of asking for a Season or Episode to be looked up again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartRefresh {
+    /// It is due for a lookup by number, as part of this Show.
+    Due {
+        show_id: i32,
+    },
+    NotFound,
+    /// Its Show has no Match, so there is nothing to look it up in.
+    ShowNotMatched,
 }
 
 /// What came of editing or unlocking fields.
@@ -353,6 +374,81 @@ impl Catalogue {
                     },
                     tmdb_id: tmdb_id.filter(|_| state.as_deref() == Some(MATCHED)),
                 }))
+            })
+            .await
+    }
+
+    /// Show `show_id` for a refresh or a picked Match; `None` if unknown.
+    pub async fn show_lookup(&self, show_id: i32) -> Result<Option<ShowLookup>> {
+        self.db
+            .run(move |conn| {
+                let row: Option<(String, i32, Option<String>, Option<i64>)> = show::table
+                    .left_join(show_metadata::table)
+                    .filter(show::id.eq(show_id))
+                    .select((
+                        show::folder_name,
+                        show::folder_year,
+                        show_metadata::match_state.nullable(),
+                        show_metadata::tmdb_id.nullable(),
+                    ))
+                    .first(conn)
+                    .optional()?;
+                Ok(row.map(|(name, year, state, tmdb_id)| ShowLookup {
+                    lookup: PendingShowLookup {
+                        show_id,
+                        name,
+                        year,
+                        failed_attempts: 0,
+                    },
+                    tmdb_id: tmdb_id.filter(|_| state.as_deref() == Some(MATCHED)),
+                }))
+            })
+            .await
+    }
+
+    /// Makes Season or Episode `entry` due for a lookup by number; the
+    /// lookup keeps its Locked fields.
+    pub async fn look_up_part_again(&self, entry: Entry) -> Result<PartRefresh> {
+        let show_id = match entry {
+            Entry::Season { show, .. } | Entry::Episode { show, .. } => show,
+            Entry::Movie(_) | Entry::Show(_) => {
+                anyhow::bail!("{entry:?} is not a Season or Episode")
+            }
+        };
+        self.db
+            .run(move |conn| {
+                conn.transaction(|conn| {
+                    let Some(target) = resolve(conn, entry)? else {
+                        return Ok(PartRefresh::NotFound);
+                    };
+                    let state: Option<String> = show_metadata::table
+                        .find(show_id)
+                        .select(show_metadata::match_state)
+                        .first(conn)
+                        .optional()?;
+                    if state.as_deref() != Some(MATCHED) {
+                        return Ok(PartRefresh::ShowNotMatched);
+                    }
+                    ensure_metadata(conn, target)?;
+                    match target {
+                        Target::Season(id) => diesel::update(season_metadata::table.find(id))
+                            .set((
+                                season_metadata::match_state.eq(RETRYING),
+                                season_metadata::lookup_attempts.eq(0),
+                                season_metadata::retry_at_ms.eq(DUE),
+                            ))
+                            .execute(conn)?,
+                        Target::Episode(id) => diesel::update(episode_metadata::table.find(id))
+                            .set((
+                                episode_metadata::match_state.eq(RETRYING),
+                                episode_metadata::lookup_attempts.eq(0),
+                                episode_metadata::retry_at_ms.eq(DUE),
+                            ))
+                            .execute(conn)?,
+                        Target::Movie(_) | Target::Show(_) => unreachable!("resolved from a part"),
+                    };
+                    Ok(PartRefresh::Due { show_id })
+                })
             })
             .await
     }

@@ -24,6 +24,10 @@ pub fn routes() -> Router<ApiState> {
     Router::new()
         .route(&format!("{MOVIE}/match"), put(pick_movie_match))
         .route(&format!("{MOVIE}/refresh"), post(refresh_movie))
+        .route(&format!("{SHOW}/match"), put(pick_show_match))
+        .route(&format!("{SHOW}/refresh"), post(refresh_show))
+        .route(&format!("{SEASON}/refresh"), post(refresh_season))
+        .route(&format!("{EPISODE}/refresh"), post(refresh_episode))
         .route(MOVIE, patch(edit_movie))
         .route(SHOW, patch(edit_show))
         .route(SEASON, patch(edit_season))
@@ -37,11 +41,12 @@ pub fn routes() -> Router<ApiState> {
         )
 }
 
-/// A [`Corrected`] as an answer: 204, 404, 400 or 503.
+/// A [`Corrected`] as an answer: 204, 404, 409, 400 or 503.
 fn answer(corrected: Corrected) -> Result<StatusCode, ApiError> {
     match corrected {
         Corrected::Done => Ok(StatusCode::NO_CONTENT),
         Corrected::NotFound(message) => Err(ApiError::not_found(message)),
+        Corrected::Refused(message) => Err(ApiError::conflict(message)),
         Corrected::Rejected(message) => Err(ApiError::bad_request(message)),
         Corrected::Unavailable(message) => Err(ApiError::unavailable(message)),
     }
@@ -69,6 +74,50 @@ async fn refresh_movie(
     Path(movie): Path<i32>,
 ) -> Result<StatusCode, ApiError> {
     answer(matcher.refresh_movie(movie).await?)
+}
+
+/// `PUT /admin/shows/<id>/match` with `{"tmdb_id"}`: makes that TMDB Show
+/// its Match; every field that is not locked is refilled, and its Seasons
+/// and Episodes are looked up again by number (what they had from the old
+/// Match is cleared, Locked fields kept).
+async fn pick_show_match(
+    State(matcher): State<Matcher>,
+    Path(show): Path<i32>,
+    Json(pick): Json<Pick>,
+) -> Result<StatusCode, ApiError> {
+    answer(matcher.pick_show_match(show, pick.tmdb_id).await?)
+}
+
+/// `POST /admin/shows/<id>/refresh`: as for a Movie, with its Seasons and
+/// Episodes.
+async fn refresh_show(
+    State(matcher): State<Matcher>,
+    Path(show): Path<i32>,
+) -> Result<StatusCode, ApiError> {
+    answer(matcher.refresh_show(show).await?)
+}
+
+/// `POST /admin/shows/<id>/seasons/<n>/refresh`: looks the Season up again
+/// by number (not its Episodes); 409 if the Show has no Match.
+async fn refresh_season(
+    State(matcher): State<Matcher>,
+    Path((show, number)): Path<(i32, i32)>,
+) -> Result<StatusCode, ApiError> {
+    answer(matcher.refresh_part(Entry::Season { show, number }).await?)
+}
+
+/// `POST /admin/shows/<id>/seasons/<n>/episodes/<n>/refresh`: as for a
+/// Season.
+async fn refresh_episode(
+    State(matcher): State<Matcher>,
+    Path((show, season, number)): Path<(i32, i32, i32)>,
+) -> Result<StatusCode, ApiError> {
+    let entry = Entry::Episode {
+        show,
+        season,
+        number,
+    };
+    answer(matcher.refresh_part(entry).await?)
 }
 
 /// An [`Edited`] as an answer: `{"locked_fields": [...]}`, 404 or 400.

@@ -6,6 +6,7 @@
 use anyhow::Result;
 
 use super::{LookupError, Matcher};
+use crate::catalogue::{Entry, PartRefresh};
 
 /// What came of an admin's lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +14,8 @@ pub enum Corrected {
     Done,
     /// No such entry (or Unassigned media file); the message says which.
     NotFound(String),
+    /// The entry cannot be looked up as asked; the message says why.
+    Refused(String),
     /// TMDB refused: no such id, or nothing usable under it.
     Rejected(String),
     /// TMDB (or the `assets` bucket) is unavailable: try again later.
@@ -57,5 +60,63 @@ impl Matcher {
                 Ok(Corrected::Done)
             }
         }
+    }
+
+    /// Makes TMDB Show `tmdb_id` the Match of Show `show_id`, as for a
+    /// Movie; its Seasons and Episodes are then looked up again by number.
+    pub async fn pick_show_match(&self, show_id: i32, tmdb_id: i64) -> Result<Corrected> {
+        let Some(show) = self.catalogue.show_lookup(show_id).await? else {
+            return Ok(Corrected::NotFound("no such show".into()));
+        };
+        let found = match self.fetch_show(tmdb_id, Some(show.lookup.year)).await {
+            Ok(found) => found,
+            Err(e) => return Ok(e.into()),
+        };
+        self.catalogue.show_matched(show_id, found).await?;
+        self.look_up_parts_of(show_id).await?;
+        Ok(Corrected::Done)
+    }
+
+    /// Fetches Show `show_id` from TMDB again, as for a Movie, with its
+    /// Seasons and Episodes.
+    pub async fn refresh_show(&self, show_id: i32) -> Result<Corrected> {
+        let Some(show) = self.catalogue.show_lookup(show_id).await? else {
+            return Ok(Corrected::NotFound("no such show".into()));
+        };
+        match show.tmdb_id {
+            Some(tmdb_id) => self.pick_show_match(show_id, tmdb_id).await,
+            None => {
+                self.look_up_show(show.lookup).await?;
+                self.look_up_parts_of(show_id).await?;
+                Ok(Corrected::Done)
+            }
+        }
+    }
+
+    /// Looks Season or Episode `entry` up again by number, now. Its Show
+    /// must have a Match.
+    pub async fn refresh_part(&self, entry: Entry) -> Result<Corrected> {
+        match self.catalogue.look_up_part_again(entry).await? {
+            PartRefresh::Due { show_id } => {
+                self.look_up_parts_of(show_id).await?;
+                Ok(Corrected::Done)
+            }
+            PartRefresh::NotFound => Ok(Corrected::NotFound("no such entry".into())),
+            PartRefresh::ShowNotMatched => Ok(Corrected::Refused(
+                "its Show has no Match: pick one first".into(),
+            )),
+        }
+    }
+
+    /// Looks up the Seasons and Episodes of Show `show_id` that are due now,
+    /// rather than waiting for the next pass. TMDB failing for one of them
+    /// leaves it to be retried, as in a pass.
+    async fn look_up_parts_of(&self, show_id: i32) -> Result<()> {
+        for pending in self.catalogue.pending_parts().await? {
+            if pending.show_id == show_id {
+                self.look_up_part(pending).await?;
+            }
+        }
+        Ok(())
     }
 }

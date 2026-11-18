@@ -61,6 +61,8 @@ pub struct ShowMatch {
 #[derive(Debug, Clone)]
 pub struct PendingPart {
     pub part: Part,
+    /// The Show it belongs to.
+    pub show_id: i32,
     /// The TMDB id of its Show's Match.
     pub show_tmdb_id: i64,
     pub season: i32,
@@ -142,6 +144,7 @@ impl From<ShowMetadataRow> for ShowMetadataView {
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = season_metadata)]
 pub(super) struct SeasonMetadataRow {
+    pub season_id: i32,
     pub name: Option<String>,
     pub description: Option<String>,
     pub image_key: Option<String>,
@@ -192,6 +195,81 @@ pub(super) fn episode_rows(
         .load(conn)?)
 }
 
+/// Makes every Season and Episode of Show `show_id` due for a lookup by
+/// number. With `clear`, what they had from TMDB is cleared first, except
+/// their Locked fields.
+fn look_up_parts_again(conn: &mut SqliteConnection, show_id: i32, clear: bool) -> Result<()> {
+    let seasons: Vec<i32> = season::table
+        .filter(season::show_id.eq(show_id))
+        .select(season::id)
+        .load(conn)?;
+    let episodes: Vec<i32> = episode::table
+        .filter(episode::season_id.eq_any(&seasons))
+        .select(episode::id)
+        .load(conn)?;
+    if clear {
+        for c in season_rows(conn, &seasons)? {
+            let locks = LockedFields::parse(&c.locked_fields);
+            diesel::update(season_metadata::table.find(c.season_id))
+                .set((
+                    season_metadata::name.eq(unless_locked(&locks, "name", None, c.name)),
+                    season_metadata::description.eq(unless_locked(
+                        &locks,
+                        "description",
+                        None,
+                        c.description,
+                    )),
+                    season_metadata::image_key.eq(unless_locked(
+                        &locks,
+                        "image",
+                        None,
+                        c.image_key,
+                    )),
+                ))
+                .execute(conn)?;
+        }
+        for c in episode_rows(conn, &episodes)? {
+            let locks = LockedFields::parse(&c.locked_fields);
+            diesel::update(episode_metadata::table.find(c.episode_id))
+                .set((
+                    episode_metadata::tmdb_id.eq(None::<i64>),
+                    episode_metadata::name.eq(unless_locked(&locks, "name", None, c.name)),
+                    episode_metadata::description.eq(unless_locked(
+                        &locks,
+                        "description",
+                        None,
+                        c.description,
+                    )),
+                    episode_metadata::image_key.eq(unless_locked(
+                        &locks,
+                        "image",
+                        None,
+                        c.image_key,
+                    )),
+                    episode_metadata::air_date
+                        .eq(unless_locked(&locks, "air_date", None, c.air_date)),
+                    episode_metadata::imdb_id.eq(unless_locked(&locks, "imdb_id", None, c.imdb_id)),
+                ))
+                .execute(conn)?;
+        }
+    }
+    diesel::update(season_metadata::table.filter(season_metadata::season_id.eq_any(&seasons)))
+        .set((
+            season_metadata::match_state.eq(RETRYING),
+            season_metadata::lookup_attempts.eq(0),
+            season_metadata::retry_at_ms.eq(Some(0i64)),
+        ))
+        .execute(conn)?;
+    diesel::update(episode_metadata::table.filter(episode_metadata::episode_id.eq_any(&episodes)))
+        .set((
+            episode_metadata::match_state.eq(RETRYING),
+            episode_metadata::lookup_attempts.eq(0),
+            episode_metadata::retry_at_ms.eq(Some(0i64)),
+        ))
+        .execute(conn)?;
+    Ok(())
+}
+
 /// `new`, unless `field` is locked: then `old`.
 fn unless_locked<T>(locks: &LockedFields, field: &str, new: T, old: T) -> T {
     if locks.contains(field) { old } else { new }
@@ -234,7 +312,10 @@ impl Catalogue {
     }
 
     /// The Show has a Match: every field that is not locked is filled in.
-    /// Its Seasons and Episodes are looked up by the next [`Self::pending_parts`].
+    /// Its Seasons and Episodes are looked up again by the next
+    /// [`Self::pending_parts`]; when the Match is another TMDB Show than
+    /// before, what they had from the old one is cleared first (Locked fields
+    /// are kept), so nothing of it stays should TMDB not answer.
     pub async fn show_matched(&self, show_id: i32, found: ShowMatch) -> Result<()> {
         self.db
             .run(move |conn| {
@@ -248,6 +329,9 @@ impl Catalogue {
                         Some((locks, c)) => (LockedFields::parse(&locks), Some(c)),
                         None => (LockedFields::default(), None),
                     };
+                    let same_match = current
+                        .as_ref()
+                        .is_some_and(|c| c.tmdb_id == Some(found.tmdb_id));
                     let (imdb_id, description, image_key) = match current {
                         Some(c) => (
                             unless_locked(&locks, "imdb_id", found.imdb_id, c.imdb_id),
@@ -285,7 +369,7 @@ impl Catalogue {
                         show_candidate::table.filter(show_candidate::show_id.eq(show_id)),
                     )
                     .execute(conn)?;
-                    Ok(())
+                    look_up_parts_again(conn, show_id, !same_match)
                 })
             })
             .await
@@ -423,7 +507,8 @@ impl Catalogue {
         let now = self.clock.now_ms();
         self.db
             .run(move |conn| {
-                let seasons: Vec<(i32, i32, Option<i64>, Option<i32>)> = season::table
+                #[allow(clippy::type_complexity)]
+                let seasons: Vec<(i32, i32, i32, Option<i64>, Option<i32>)> = season::table
                     .inner_join(show::table.inner_join(show_metadata::table))
                     .left_join(season_metadata::table)
                     .filter(show_metadata::match_state.eq(MATCHED))
@@ -437,13 +522,14 @@ impl Catalogue {
                     .order(season::id.asc())
                     .select((
                         season::id,
+                        season::show_id,
                         season::number,
                         show_metadata::tmdb_id,
                         season_metadata::lookup_attempts.nullable(),
                     ))
                     .load(conn)?;
                 #[allow(clippy::type_complexity)]
-                let episodes: Vec<(i32, i32, i32, Option<i64>, Option<i32>)> = episode::table
+                let episodes: Vec<(i32, i32, i32, i32, Option<i64>, Option<i32>)> = episode::table
                     .inner_join(
                         season::table.inner_join(show::table.inner_join(show_metadata::table)),
                     )
@@ -460,26 +546,28 @@ impl Catalogue {
                     .select((
                         episode::id,
                         episode::number,
+                        season::show_id,
                         season::number,
                         show_metadata::tmdb_id,
                         episode_metadata::lookup_attempts.nullable(),
                     ))
                     .load(conn)?;
-                let seasons =
-                    seasons
-                        .into_iter()
-                        .filter_map(|(season_id, number, tmdb, attempts)| {
-                            Some(PendingPart {
-                                part: Part::Season { season_id },
-                                show_tmdb_id: tmdb?,
-                                season: number,
-                                failed_attempts: attempts.unwrap_or(0),
-                            })
-                        });
+                let seasons = seasons.into_iter().filter_map(
+                    |(season_id, show_id, number, tmdb, attempts)| {
+                        Some(PendingPart {
+                            part: Part::Season { season_id },
+                            show_id,
+                            show_tmdb_id: tmdb?,
+                            season: number,
+                            failed_attempts: attempts.unwrap_or(0),
+                        })
+                    },
+                );
                 let episodes = episodes.into_iter().filter_map(
-                    |(episode_id, number, season, tmdb, attempts)| {
+                    |(episode_id, number, show_id, season, tmdb, attempts)| {
                         Some(PendingPart {
                             part: Part::Episode { episode_id, number },
+                            show_id,
                             show_tmdb_id: tmdb?,
                             season,
                             failed_attempts: attempts.unwrap_or(0),
