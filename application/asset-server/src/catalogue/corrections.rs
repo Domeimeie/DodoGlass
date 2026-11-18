@@ -13,13 +13,11 @@ use serde_json::{Map, Value};
 
 use super::Catalogue;
 use super::admin::Entry;
-use super::metadata::{LOCKABLE_FIELDS, LockedFields, PendingLookup};
+use super::metadata::{LOCKABLE_FIELDS, LockedFields, LookupDue};
 use super::schema::{
     episode, episode_metadata, movie, movie_metadata, season, season_metadata, show, show_metadata,
 };
-use super::show_metadata::{
-    EPISODE_LOCKABLE_FIELDS, PendingShowLookup, SEASON_LOCKABLE_FIELDS, SHOW_LOCKABLE_FIELDS,
-};
+use super::show_metadata::{EPISODE_LOCKABLE_FIELDS, SEASON_LOCKABLE_FIELDS, SHOW_LOCKABLE_FIELDS};
 
 const MATCHED: &str = "matched";
 const RETRYING: &str = "retrying";
@@ -30,14 +28,14 @@ const DUE: Option<i64> = Some(0);
 /// and its Match, if it has one.
 #[derive(Debug, Clone)]
 pub struct MovieLookup {
-    pub lookup: PendingLookup,
+    pub lookup: LookupDue,
     pub tmdb_id: Option<i64>,
 }
 
 /// A Show as a refresh or a picked Match needs it, as [`MovieLookup`].
 #[derive(Debug, Clone)]
 pub struct ShowLookup {
-    pub lookup: PendingShowLookup,
+    pub lookup: LookupDue,
     pub tmdb_id: Option<i64>,
 }
 
@@ -366,8 +364,8 @@ impl Catalogue {
                     .first(conn)
                     .optional()?;
                 Ok(row.map(|(name, year, state, tmdb_id)| MovieLookup {
-                    lookup: PendingLookup {
-                        movie_id,
+                    lookup: LookupDue {
+                        id: movie_id,
                         name,
                         year,
                         failed_attempts: 0,
@@ -394,8 +392,8 @@ impl Catalogue {
                     .first(conn)
                     .optional()?;
                 Ok(row.map(|(name, year, state, tmdb_id)| ShowLookup {
-                    lookup: PendingShowLookup {
-                        show_id,
+                    lookup: LookupDue {
+                        id: show_id,
                         name,
                         year,
                         failed_attempts: 0,

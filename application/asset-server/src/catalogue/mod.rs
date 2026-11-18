@@ -42,12 +42,12 @@ pub use media_files::{
     Manifests, MediaFileState, MediaFileStatus, PROCESSING_TIMEOUT_MS, TIMED_OUT, TrackedMediaFile,
 };
 pub use metadata::{
-    Candidate, LOCKABLE_FIELDS, LockedFields, MovieMatch, MovieMetadataView, NeedsReviewMovie,
-    PendingLookup,
+    Candidate, LOCKABLE_FIELDS, LockedFields, LookupDue, MovieMatch, MovieMetadataView,
+    NeedsReviewMovie,
 };
 pub use movies::{MediaFileView, MovieView};
 pub use show_metadata::{
-    EPISODE_LOCKABLE_FIELDS, EpisodeMatch, NeedsReviewShow, Part, PendingPart, PendingShowLookup,
+    EPISODE_LOCKABLE_FIELDS, EpisodeMatch, NeedsReviewShow, Part, PartLookupDue,
     SEASON_LOCKABLE_FIELDS, SHOW_LOCKABLE_FIELDS, SeasonMatch, ShowMatch, ShowMetadataView,
 };
 pub use shows::{EpisodeView, SeasonView, ShowView};

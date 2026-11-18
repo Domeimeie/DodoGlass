@@ -16,7 +16,7 @@ use diesel::prelude::*;
 use serde::Serialize;
 
 use super::Catalogue;
-use super::metadata::{Candidate, LockedFields};
+use super::metadata::{Candidate, LockedFields, LookupDue};
 use super::schema::{
     episode, episode_metadata, season, season_metadata, show, show_candidate, show_metadata,
 };
@@ -34,17 +34,6 @@ pub const SEASON_LOCKABLE_FIELDS: [&str; 3] = ["name", "description", "image"];
 pub const EPISODE_LOCKABLE_FIELDS: [&str; 5] =
     ["name", "description", "image", "air_date", "imdb_id"];
 
-/// A Show waiting for a TMDB lookup.
-#[derive(Debug, Clone)]
-pub struct PendingShowLookup {
-    pub show_id: i32,
-    /// Name and first-air year from the upload folder: what TMDB is searched for.
-    pub name: String,
-    pub year: i32,
-    /// Lookups that already failed because TMDB was unavailable.
-    pub failed_attempts: i32,
-}
-
 /// What a Show's Match fills in.
 #[derive(Debug, Clone)]
 pub struct ShowMatch {
@@ -57,9 +46,9 @@ pub struct ShowMatch {
     pub image_key: Option<String>,
 }
 
-/// A Season or Episode of a matched Show, waiting to be looked up by number.
+/// A Season or Episode of a matched Show due for a lookup by number.
 #[derive(Debug, Clone)]
-pub struct PendingPart {
+pub struct PartLookupDue {
     pub part: Part,
     /// The Show it belongs to.
     pub show_id: i32,
@@ -333,7 +322,7 @@ pub(super) fn apply_show_match(
 
 impl Catalogue {
     /// The Shows to look up now: new ones, and those whose retry is due.
-    pub async fn pending_show_lookups(&self) -> Result<Vec<PendingShowLookup>> {
+    pub async fn show_lookups_due(&self) -> Result<Vec<LookupDue>> {
         let now = self.clock.now_ms();
         self.db
             .run(move |conn| {
@@ -356,8 +345,8 @@ impl Catalogue {
                     .load(conn)?;
                 Ok(rows
                     .into_iter()
-                    .map(|(show_id, name, year, attempts)| PendingShowLookup {
-                        show_id,
+                    .map(|(id, name, year, attempts)| LookupDue {
+                        id,
                         name,
                         year,
                         failed_attempts: attempts.unwrap_or(0),
@@ -369,7 +358,7 @@ impl Catalogue {
 
     /// The Show has a Match: every field that is not locked is filled in.
     /// Its Seasons and Episodes are looked up again by the next
-    /// [`Self::pending_parts`]; when the Match is another TMDB Show than
+    /// [`Self::part_lookups_due`]; when the Match is another TMDB Show than
     /// before, what they had from the old one is cleared first (Locked fields
     /// are kept), so nothing of it stays should TMDB not answer.
     pub async fn show_matched(&self, show_id: i32, found: ShowMatch) -> Result<()> {
@@ -506,7 +495,7 @@ impl Catalogue {
 
     /// The Seasons and Episodes of matched Shows to look up now: those not
     /// looked up yet, and those whose retry is due. Seasons first.
-    pub async fn pending_parts(&self) -> Result<Vec<PendingPart>> {
+    pub async fn part_lookups_due(&self) -> Result<Vec<PartLookupDue>> {
         let now = self.clock.now_ms();
         self.db
             .run(move |conn| {
@@ -557,7 +546,7 @@ impl Catalogue {
                     .load(conn)?;
                 let seasons = seasons.into_iter().filter_map(
                     |(season_id, show_id, number, tmdb, attempts)| {
-                        Some(PendingPart {
+                        Some(PartLookupDue {
                             part: Part::Season { season_id },
                             show_id,
                             show_tmdb_id: tmdb?,
@@ -568,7 +557,7 @@ impl Catalogue {
                 );
                 let episodes = episodes.into_iter().filter_map(
                     |(episode_id, number, show_id, season, tmdb, attempts)| {
-                        Some(PendingPart {
+                        Some(PartLookupDue {
                             part: Part::Episode { episode_id, number },
                             show_id,
                             show_tmdb_id: tmdb?,

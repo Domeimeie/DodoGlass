@@ -35,8 +35,8 @@ pub use admin::{AttachNew, Corrected};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::catalogue::{
-    Candidate, Catalogue, EpisodeMatch, MovieMatch, Part, PendingLookup, PendingPart,
-    PendingShowLookup, SeasonMatch, ShowMatch,
+    Candidate, Catalogue, EpisodeMatch, LookupDue, MovieMatch, Part, PartLookupDue, SeasonMatch,
+    ShowMatch,
 };
 use crate::ports::tmdb::{MovieSummary, ShowSummary, Tmdb, TmdbError};
 
@@ -111,20 +111,20 @@ impl Matcher {
     /// Looks up every Movie, Show, Season and Episode that is new or whose
     /// retry is due.
     pub async fn run_once(&self) -> Result<()> {
-        for lookup in self.catalogue.pending_lookups().await? {
+        for lookup in self.catalogue.movie_lookups_due().await? {
             self.look_up(lookup).await?;
         }
-        for lookup in self.catalogue.pending_show_lookups().await? {
+        for lookup in self.catalogue.show_lookups_due().await? {
             self.look_up_show(lookup).await?;
         }
-        for pending in self.catalogue.pending_parts().await? {
-            self.look_up_part(pending).await?;
+        for due in self.catalogue.part_lookups_due().await? {
+            self.look_up_part(due).await?;
         }
         Ok(())
     }
 
-    async fn look_up(&self, lookup: PendingLookup) -> Result<()> {
-        let movie = lookup.movie_id;
+    async fn look_up(&self, lookup: LookupDue) -> Result<()> {
+        let movie = lookup.id;
         match self.find(&lookup).await {
             Ok(Outcome::Matched(found)) => {
                 info!(movie, tmdb_id = found.tmdb_id, name = %found.name, "matched");
@@ -149,7 +149,7 @@ impl Matcher {
         }
     }
 
-    async fn find(&self, lookup: &PendingLookup) -> Result<Outcome<MovieMatch>, LookupError> {
+    async fn find(&self, lookup: &LookupDue) -> Result<Outcome<MovieMatch>, LookupError> {
         let results = self.tmdb.search_movie(&lookup.name, lookup.year).await?;
         let results = results.into_iter().map(movie_candidate).collect();
         match pick_exact(results, &lookup.name, lookup.year) {
@@ -183,8 +183,8 @@ impl Matcher {
         })
     }
 
-    async fn look_up_show(&self, lookup: PendingShowLookup) -> Result<()> {
-        let show = lookup.show_id;
+    async fn look_up_show(&self, lookup: LookupDue) -> Result<()> {
+        let show = lookup.id;
         match self.find_show(&lookup).await {
             Ok(Outcome::Matched(found)) => {
                 info!(show, tmdb_id = found.tmdb_id, name = %found.name, "show matched");
@@ -209,10 +209,7 @@ impl Matcher {
         }
     }
 
-    async fn find_show(
-        &self,
-        lookup: &PendingShowLookup,
-    ) -> Result<Outcome<ShowMatch>, LookupError> {
+    async fn find_show(&self, lookup: &LookupDue) -> Result<Outcome<ShowMatch>, LookupError> {
         let results = self.tmdb.search_tv(&lookup.name, lookup.year).await?;
         let results = results.into_iter().map(show_candidate).collect();
         match pick_exact(results, &lookup.name, lookup.year) {
@@ -248,23 +245,21 @@ impl Matcher {
     /// Looks a Season or Episode of a matched Show up by number. TMDB not
     /// knowing it, or refusing, leaves its number as its name: it never
     /// goes to Needs review.
-    async fn look_up_part(&self, pending: PendingPart) -> Result<()> {
-        let part = pending.part;
+    async fn look_up_part(&self, due: PartLookupDue) -> Result<()> {
+        let part = due.part;
         let outcome = match part {
-            Part::Season { season_id } => match self.find_season(&pending).await {
+            Part::Season { season_id } => match self.find_season(&due).await {
                 Ok(found) => return self.catalogue.season_looked_up(season_id, found).await,
                 Err(e) => e,
             },
-            Part::Episode { episode_id, number } => {
-                match self.find_episode(&pending, number).await {
-                    Ok(found) => return self.catalogue.episode_looked_up(episode_id, found).await,
-                    Err(e) => e,
-                }
-            }
+            Part::Episode { episode_id, number } => match self.find_episode(&due, number).await {
+                Ok(found) => return self.catalogue.episode_looked_up(episode_id, found).await,
+                Err(e) => e,
+            },
         };
         let refused = match outcome {
             LookupError::Retry(e) => {
-                let failed = pending.failed_attempts + 1;
+                let failed = due.failed_attempts + 1;
                 let retry_in = retry_delay(failed);
                 warn!(?part, error = %e, retry_in_s = retry_in.as_secs(), "lookup failed, retrying");
                 return self
@@ -283,7 +278,7 @@ impl Matcher {
         }
     }
 
-    async fn find_season(&self, p: &PendingPart) -> Result<Option<SeasonMatch>, LookupError> {
+    async fn find_season(&self, p: &PartLookupDue) -> Result<Option<SeasonMatch>, LookupError> {
         let Some(season) = self.tmdb.season(p.show_tmdb_id, p.season).await? else {
             return Ok(None);
         };
@@ -296,7 +291,7 @@ impl Matcher {
 
     async fn find_episode(
         &self,
-        p: &PendingPart,
+        p: &PartLookupDue,
         number: i32,
     ) -> Result<Option<EpisodeMatch>, LookupError> {
         let Some(episode) = self.tmdb.episode(p.show_tmdb_id, p.season, number).await? else {

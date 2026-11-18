@@ -53,11 +53,13 @@ impl LockedFields {
     }
 }
 
-/// A Movie waiting for a TMDB lookup.
+/// A Movie or Show due for a TMDB search: new, or its retry is due.
 #[derive(Debug, Clone)]
-pub struct PendingLookup {
-    pub movie_id: i32,
-    /// Name and year from the upload folder: what TMDB is searched for.
+pub struct LookupDue {
+    /// The Movie's or the Show's id.
+    pub id: i32,
+    /// Name and year (a Show's first-air year) from the upload folder: what
+    /// TMDB is searched for.
     pub name: String,
     pub year: i32,
     /// Lookups that already failed because TMDB was unavailable.
@@ -211,7 +213,7 @@ pub(super) fn apply_movie_match(
 
 impl Catalogue {
     /// The Movies to look up now: new ones, and those whose retry is due.
-    pub async fn pending_lookups(&self) -> Result<Vec<PendingLookup>> {
+    pub async fn movie_lookups_due(&self) -> Result<Vec<LookupDue>> {
         let now = self.clock.now_ms();
         self.db
             .run(move |conn| {
@@ -234,8 +236,8 @@ impl Catalogue {
                     .load(conn)?;
                 Ok(rows
                     .into_iter()
-                    .map(|(movie_id, name, year, attempts)| PendingLookup {
-                        movie_id,
+                    .map(|(id, name, year, attempts)| LookupDue {
+                        id,
                         name,
                         year,
                         failed_attempts: attempts.unwrap_or(0),
