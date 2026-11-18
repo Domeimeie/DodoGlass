@@ -32,6 +32,13 @@ pub fn task_id_from_key(key: &str) -> String {
     format!("{}-{}", readable_prefix(&key), &hex[..HASH_DIGITS])
 }
 
+/// Whether two object keys name the same upload: equal in Unicode NFC, as
+/// their task ids are. S3 keeps the bytes as sent, so the NFC and NFD
+/// spellings of a path are two objects but one video.
+pub fn same_key(a: &str, b: &str) -> bool {
+    a == b || a.nfc().eq(b.nfc())
+}
+
 /// The part of an id a person reads; not unique on its own.
 fn readable_prefix(key: &str) -> String {
     let stem = match key.rsplit_once('.') {
@@ -127,5 +134,7 @@ mod tests {
             task_id_from_key(nfd),
             "movies_Am_lie__2001__amelie-7657ef7e"
         );
+        assert!(same_key(nfd, nfc));
+        assert!(!same_key(nfc, "movies/Am lie (2001)/amelie.mkv"));
     }
 }

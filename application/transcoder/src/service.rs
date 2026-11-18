@@ -106,10 +106,11 @@ struct SourceObject {
 
 impl SourceMarker {
     /// Whether this output was made from exactly this version of this object,
-    /// in these formats, so transcoding it again would change nothing.
+    /// in these formats, so transcoding it again would change nothing. The NFC
+    /// and NFD spellings of a key are the same video (same id, ADR 0004).
     fn describes(&self, bucket: &str, key: &str, etag: &str, formats: &[Format]) -> bool {
         self.input.bucket == bucket
-            && self.input.key == key
+            && dodoglass_ids::same_key(&self.input.key, key)
             && self.etag == etag
             && self.formats == formats
     }
@@ -565,6 +566,15 @@ mod tests {
         assert!(!m.describes("ingest", "a.mp4", "e1", &both));
         assert!(!m.describes("other", "a.mkv", "e1", &both));
         assert!(!m.describes("ingest", "a.mkv", "e1", &[Format::Hls]));
+    }
+
+    #[test]
+    fn marker_skips_the_other_unicode_spelling_of_the_same_key() {
+        // Same id (ADR 0004), so the same video: an NFD re-upload of an NFC
+        // key is skipped like any unchanged re-upload.
+        let m = marker("ingest", "movies/Am\u{e9}lie (2001)/a.mkv", "e1");
+        let both = [Format::Hls, Format::Dash];
+        assert!(m.describes("ingest", "movies/Ame\u{301}lie (2001)/a.mkv", "e1", &both));
     }
 
     #[test]

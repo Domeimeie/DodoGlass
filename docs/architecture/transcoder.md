@@ -404,7 +404,8 @@ replaced. `sample.mkv` is a different video with its own folder.
 
 - After a task completed, `final/<id>/source.json` records the input (`{"bucket", "key"}`), its
   **eTag** and the formats. An event for the same bucket and key with the same eTag and formats is
-  skipped. A marker in the old format (input as a `s3://…` string) is unreadable, so that video is
+  skipped; keys are compared in NFC, so the NFC and NFD spellings of a path (one id) count as the
+  same name. A marker in the old format (input as a `s3://…` string) is unreadable, so that video is
   transcoded again. The marker is deleted before a replacement
   starts, so a half-replaced output is never taken for complete.
 - **At most one task per id at a time:** a second one waits (keeping its slot) instead of running in
