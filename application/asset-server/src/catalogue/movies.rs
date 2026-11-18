@@ -20,7 +20,7 @@ pub struct MovieView {
 pub struct MediaFileView {
     pub id: String,
     pub label: String,
-    /// Whether this is the Default media file of its Movie.
+    /// Whether this is the Default media file of its Movie or Episode.
     pub default: bool,
     pub manifests: Manifests,
 }

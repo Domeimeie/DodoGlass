@@ -26,6 +26,7 @@ pub struct Manifests {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Owner {
     Movie(i32),
+    Episode(i32),
 }
 
 /// Creates the Media file `id` as Processing, or makes an existing one
@@ -62,12 +63,17 @@ pub(super) fn processing(
         }
         None => (stem.to_string(), false),
     };
-    let movie = owner.map(|Owner::Movie(movie)| movie);
+    let (movie, episode) = match owner {
+        Some(Owner::Movie(movie)) => (Some(movie), None),
+        Some(Owner::Episode(episode)) => (None, Some(episode)),
+        None => (None, None),
+    };
     diesel::insert_into(media_file::table)
         .values((
             media_file::id.eq(id),
             media_file::source_key.eq(key),
             media_file::movie_id.eq(movie),
+            media_file::episode_id.eq(episode),
             media_file::label.eq(label),
             media_file::is_default.eq(is_default),
             media_file::state.eq(PROCESSING),
@@ -83,6 +89,9 @@ fn labels_of(conn: &mut SqliteConnection, owner: Owner) -> Result<Vec<String>> {
     let query = media_file::table.select(media_file::label);
     Ok(match owner {
         Owner::Movie(movie) => query.filter(media_file::movie_id.eq(movie)).load(conn)?,
+        Owner::Episode(episode) => query
+            .filter(media_file::episode_id.eq(episode))
+            .load(conn)?,
     })
 }
 

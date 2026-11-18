@@ -20,31 +20,38 @@ in `docs/adr/` (ADR 0001–0004).
 
 ## Built so far
 
-The tracer bullet: a Movie upload becomes listable.
+The tracer bullet (a Movie upload becomes listable), then Shows.
 
 - **Ingest listener** on `$share/assets/dodoglass/ingest`. It reads the standard S3 part of each
   event, URL-decodes the keys, handles several records per message, and acknowledges a message only
   after it is stored.
 - **Placement of Movies:** `movies/<Name> (<Year>)/<label>.<ext>` creates the Movie (or finds it) and
   a **Processing** Media file whose id is the shared crate's task id. Keys are normalised to NFC.
-  Every other upload is stored without a Movie (Unassigned); Shows come next.
+- **Placement of Episodes:** `shows/<Name> (<Year>)/Season <n>/S<nn>E<nn>…` (or `Specials/`, Season
+  0) finds or creates the Show (by folder name and year), its Season (by number) and its Episode (by
+  number), and a Processing Media file attached to the Episode. Every other upload is stored without
+  a Movie or Episode (Unassigned).
 - **Several Media files per Movie:** each one's Label is its file name without the extension, made
   unique within the Movie (`matrix.mkv` + `matrix.mp4` → "matrix", "matrix (mp4)"; a number is
   added if that is taken too). The first one uploaded is the **Default media file**. A re-upload to
   the same path keeps the id, Label and default flag and goes back to Processing. Labels and the
   default are kept per *owner* of the Media file (`media_file.is_default`, unique indexes per
-  owner), so Episodes use the same rules.
+  owner), so Movies and Episodes follow the same rules.
 - **Reconciler:** a Processing Media file becomes **Ready** when `final/<id>/source.json` exists, at
   startup and every `--reconcile-interval` seconds (default 300). Its manifest keys follow the
   `formats` in the marker.
 - **Read API:** `GET /movies` lists the Movies that are not Hidden, with their Ready Media files:
   `[{"name", "year", "media_files": [{"id", "label", "default", "manifests": {"hls", "dash"}}]}]`,
   the Media files ordered by Label.
+  `GET /shows` → `[{"id", "name", "year"}]`, `GET /shows/{id}/seasons` → `[{"number"}]`,
+  `GET /shows/{id}/seasons/{number}/episodes` → `[{"number", "media_files": [...]}]` (Media files as
+  for Movies). Hidden applies at every level: an Episode needs a Ready Media file, a Season a listed
+  Episode, a Show a listed Season; a Hidden or unknown Show or Season answers 404.
 - **Database:** SQLite via Diesel, migrations in portable SQL run at startup. Tables so far: `movie`
   (with `folder_name`/`folder_year`, the placement identity, apart from the displayed `name`/`year`)
-  and `media_file`.
+  and `media_file`; `show` (same folder identity), `season`, `episode`, and `media_file.episode_id`.
 
-Not built yet: Shows, Failed and Missing, a new default when the default goes away, status hints,
+Not built yet: Failed and Missing, a new default when the default goes away, status hints,
 TMDB, images and the admin API.
 
 **Running it:** `go-task infra:up`, `go-task transcoder:serve-s3`, `go-task asset-server:serve`
