@@ -3,9 +3,11 @@
 //!
 //! - [`upload_events`]: the stream of upload events (MQTT in production);
 //! - [`storage`]: the `ingest`, `final` and `assets` buckets (`object_store`);
-//! - [`clock`]: the current time.
+//! - [`clock`]: the current time;
+//! - [`tmdb`]: TMDB, where descriptive information comes from.
 
 pub mod clock;
 pub mod mqtt;
 pub mod storage;
+pub mod tmdb;
 pub mod upload_events;

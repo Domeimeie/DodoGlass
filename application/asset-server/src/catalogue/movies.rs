@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use super::Catalogue;
 use super::media_files::{Manifests, READY};
+use super::metadata::{self, MovieMetadataView};
 use super::schema::{media_file, movie};
 
 #[derive(Debug, Clone, Serialize)]
@@ -14,6 +15,9 @@ pub struct MovieView {
     pub name: String,
     pub year: i32,
     pub media_files: Vec<MediaFileView>,
+    /// What a Match filled in (TMDB id, imdbID, description, poster).
+    #[serde(flatten)]
+    pub metadata: MovieMetadataView,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,6 +87,7 @@ impl Catalogue {
                             name: m.name,
                             year: m.year,
                             media_files: Vec::new(),
+                            metadata: MovieMetadataView::default(),
                         };
                         movies.push((m.id, view));
                     }
@@ -96,6 +101,7 @@ impl Catalogue {
                         },
                     });
                 }
+                metadata::fill_views(conn, &mut movies)?;
                 Ok(movies.into_iter().map(|(_, m)| m).collect())
             })
             .await

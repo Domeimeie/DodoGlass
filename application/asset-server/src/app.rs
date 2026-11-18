@@ -11,8 +11,10 @@ use tracing::error;
 
 use crate::catalogue::Catalogue;
 use crate::db::Db;
+use crate::matcher::Matcher;
 use crate::ports::clock::Clock;
 use crate::ports::storage::Buckets;
+use crate::ports::tmdb::Tmdb;
 use crate::ports::upload_events::UploadEvents;
 use crate::reconcile::Reconciler;
 use crate::{http, ingest};
@@ -38,27 +40,57 @@ pub struct App {
     db: Db,
     catalogue: Catalogue,
     reconciler: Reconciler,
+    matcher: Matcher,
+    assets: Arc<dyn object_store::ObjectStore>,
 }
 
 impl App {
     /// Opens the database (running migrations), then reconciles once, so
     /// that transcodes finished while the asset server was down are found.
-    pub async fn start(config: Config, buckets: Buckets, clock: Arc<dyn Clock>) -> Result<App> {
+    pub async fn start(
+        config: Config,
+        buckets: Buckets,
+        clock: Arc<dyn Clock>,
+        tmdb: Arc<dyn Tmdb>,
+    ) -> Result<App> {
         let database = config.database.clone();
         let db = tokio::task::spawn_blocking(move || Db::open(&database)).await??;
         let catalogue = Catalogue::new(db.clone(), clock);
         let reconciler = Reconciler::new(catalogue.clone(), buckets.final_, &config.final_bucket);
+        let matcher = Matcher::new(catalogue.clone(), tmdb, buckets.assets.clone());
         let app = App {
             db,
             catalogue,
             reconciler,
+            matcher,
+            assets: buckets.assets,
         };
         app.reconcile().await?;
         Ok(app)
     }
 
     pub fn router(&self) -> Router {
-        http::router(self.catalogue.clone())
+        http::router(self.catalogue.clone()).merge(http::images::router(self.assets.clone()))
+    }
+
+    /// One pass of TMDB lookups: new Movies, and retries that are due.
+    pub async fn match_metadata(&self) -> Result<()> {
+        self.matcher.run_once().await
+    }
+
+    /// Runs a pass of TMDB lookups now and then every `interval`.
+    pub fn spawn_periodic_matcher(&self, interval: Duration) -> JoinHandle<()> {
+        let matcher = self.matcher.clone();
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(interval);
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticks.tick().await;
+                if let Err(e) = matcher.run_once().await {
+                    error!(error = format!("{e:#}"), "metadata pass failed");
+                }
+            }
+        })
     }
 
     /// One reconcile pass.

@@ -11,8 +11,9 @@ use asset_server::app::{App, Config};
 use asset_server::ports::clock::SystemClock;
 use asset_server::ports::mqtt::{MqttSettings, MqttUploadEvents};
 use asset_server::ports::storage::{Buckets, S3Settings};
+use asset_server::ports::tmdb::{NoTmdb, Tmdb, TmdbClient, TmdbSettings};
 use clap::{Parser, ValueEnum};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 /// The DodoGlass asset server: places uploads in the catalogue and serves it over HTTP.
@@ -78,6 +79,20 @@ struct Cli {
           value_parser = clap::value_parser!(u64).range(1..))]
     reconcile_interval: u64,
 
+    /// TMDB API key (v3) or read access token (v4). Without one, Movies are not
+    /// looked up and keep the name and year from their folder
+    #[arg(long, env = "ASSETS_TMDB_API_KEY", hide_env_values = true)]
+    tmdb_api_key: Option<String>,
+
+    /// Language of the names and descriptions taken from TMDB
+    #[arg(long, env = "ASSETS_TMDB_LANGUAGE", default_value = "en-US")]
+    tmdb_language: String,
+
+    /// Seconds between two passes looking new Movies (and due retries) up in TMDB
+    #[arg(long, env = "ASSETS_TMDB_INTERVAL", default_value_t = 10,
+          value_parser = clap::value_parser!(u64).range(1..))]
+    tmdb_interval: u64,
+
     /// Log format: text for people, json for log collectors
     #[arg(long, env = "ASSETS_LOG_FORMAT", value_enum, default_value_t = LogFormat::Text)]
     log_format: LogFormat,
@@ -130,7 +145,11 @@ async fn run(cli: Cli) -> Result<()> {
         database: cli.database.clone(),
         final_bucket: cli.final_bucket,
     };
-    let app = App::start(config, buckets, Arc::new(SystemClock)).await?;
+    let tmdb: Arc<dyn Tmdb> = match &cli.tmdb_api_key {
+        Some(key) => Arc::new(TmdbClient::new(TmdbSettings::new(key, &cli.tmdb_language))?),
+        None => Arc::new(NoTmdb),
+    };
+    let app = App::start(config, buckets, Arc::new(SystemClock), tmdb).await?;
     info!(database = %cli.database, "catalogue open, startup reconcile done");
 
     let events = MqttUploadEvents::connect(MqttSettings {
@@ -142,6 +161,12 @@ async fn run(cli: Cli) -> Result<()> {
     .await?;
     app.spawn_ingest_listener(events);
     app.spawn_periodic_reconcile(Duration::from_secs(cli.reconcile_interval));
+    if cli.tmdb_api_key.is_some() {
+        app.spawn_periodic_matcher(Duration::from_secs(cli.tmdb_interval));
+        info!(language = %cli.tmdb_language, "TMDB lookups on");
+    } else {
+        warn!("no TMDB API key (--tmdb-api-key): Movies are not looked up");
+    }
 
     let listener = tokio::net::TcpListener::bind(cli.http_addr)
         .await

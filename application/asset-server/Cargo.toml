@@ -6,6 +6,7 @@ description = "DodoGlass asset server: the catalogue of Movies and Shows and the
 
 [dependencies]
 anyhow = "1.0.104"
+async-trait = "0.1.92"
 axum = "0.8"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 diesel = { version = "2.4", features = ["sqlite", "returning_clauses_for_sqlite_3_35"] }
@@ -16,6 +17,7 @@ futures-util = { version = "0.3.34", default-features = false, features = ["std"
 libsqlite3-sys = { version = "0.40", features = ["bundled"] }
 object_store = { version = "0.14.2", default-features = false, features = ["aws"] }
 percent-encoding = "2.3.2"
+reqwest = { version = "0.13.5", default-features = false, features = ["http2", "rustls"] }
 rumqttc = "0.25.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

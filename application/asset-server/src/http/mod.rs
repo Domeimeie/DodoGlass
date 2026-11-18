@@ -3,6 +3,7 @@
 //! `routes()`, merged here.
 
 mod error;
+pub mod images;
 mod movies;
 
 use axum::Router;

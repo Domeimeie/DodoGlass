@@ -5,9 +5,12 @@
 //! - [`placement`]: an upload seen in `ingest` becomes a Media file, placed
 //!   from its path (ADR 0003);
 //! - [`media_files`]: Media file states (Processing, Ready, ...);
-//! - [`movies`]: Movies, and what viewers see of them.
+//! - [`movies`]: Movies, and what viewers see of them;
+//! - [`metadata`]: what TMDB lookups found (Match, Needs review, retries)
+//!   and Locked fields.
 
 mod media_files;
+mod metadata;
 mod movies;
 mod placement;
 pub(crate) mod schema;
@@ -18,6 +21,10 @@ use crate::db::Db;
 use crate::ports::clock::Clock;
 
 pub use media_files::Manifests;
+pub use metadata::{
+    Candidate, LOCKABLE_FIELDS, LockedFields, MovieMatch, MovieMetadataView, NeedsReviewMovie,
+    PendingLookup,
+};
 pub use movies::{MediaFileView, MovieView};
 
 #[derive(Clone)]

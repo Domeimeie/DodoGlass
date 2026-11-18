@@ -4,6 +4,7 @@
 //! - [`ports`]: upload events, object storage and the clock, replaceable in tests;
 //! - [`ingest`]: the ingest listener (upload events → Catalogue);
 //! - [`reconcile`]: the reconciler (output markers in `final` → Ready);
+//! - [`matcher`]: TMDB lookups for new Movies (Match, Needs review, retries);
 //! - [`http`]: the HTTP API;
 //! - [`app`]: puts them together, for `main` and for the tests.
 
@@ -12,5 +13,6 @@ pub mod catalogue;
 pub mod db;
 pub mod http;
 pub mod ingest;
+pub mod matcher;
 pub mod ports;
 pub mod reconcile;
