@@ -6,6 +6,7 @@ use diesel::Connection;
 use dodoglass_ids::{Placement, place_upload, task_id_from_key};
 use unicode_normalization::UnicodeNormalization;
 
+use super::media_files::Owner;
 use super::{Catalogue, media_files, movies};
 
 impl Catalogue {
@@ -20,9 +21,10 @@ impl Catalogue {
         self.db
             .run(move |conn| {
                 conn.transaction(|conn| {
-                    let (movie, label) = match place_upload(&key) {
+                    let (owner, stem) = match place_upload(&key) {
                         Placement::Movie { name, year, label } => {
-                            (Some(movies::find_or_create(conn, &name, year)?), label)
+                            let movie = movies::find_or_create(conn, &name, year)?;
+                            (Some(Owner::Movie(movie)), label)
                         }
                         // Shows come in a later ticket; until then an Episode
                         // upload waits like an Unassigned one.
@@ -30,7 +32,7 @@ impl Catalogue {
                             (None, file_stem(&key).to_string())
                         }
                     };
-                    media_files::processing(conn, &id, &key, movie, &label, now)
+                    media_files::processing(conn, &id, &key, owner, &stem, now)
                 })
             })
             .await

@@ -25,6 +25,7 @@ async fn a_movie_upload_is_listed_once_its_transcode_is_ready() {
             "media_files": [{
                 "id": MATRIX_ID,
                 "label": "matrix",
+                "default": true,
                 "manifests": {
                     "hls": format!("final/{MATRIX_ID}/hls/master.m3u8"),
                     "dash": format!("final/{MATRIX_ID}/dash/manifest.mpd"),
@@ -119,6 +120,7 @@ async fn nfc_and_nfd_spellings_of_a_path_are_the_same_movie() {
             "media_files": [{
                 "id": "movies_Am_lie__2001__amelie-7657ef7e",
                 "label": "amelie",
+                "default": true,
                 "manifests": {
                     "hls": "final/movies_Am_lie__2001__amelie-7657ef7e/hls/master.m3u8",
                     "dash": "final/movies_Am_lie__2001__amelie-7657ef7e/dash/manifest.mpd",

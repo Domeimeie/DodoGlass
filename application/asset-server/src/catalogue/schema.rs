@@ -22,6 +22,7 @@ diesel::table! {
         hls_manifest -> Nullable<Text>,
         dash_manifest -> Nullable<Text>,
         error -> Nullable<Text>,
+        is_default -> Bool,
     }
 }
 
