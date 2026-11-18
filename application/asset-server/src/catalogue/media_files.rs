@@ -34,7 +34,8 @@ pub enum MediaFileState {
 }
 
 impl MediaFileState {
-    fn parse(s: &str) -> Result<Self> {
+    /// `ready` → Ready, as the API spells states.
+    pub fn parse(s: &str) -> Result<Self> {
         Ok(match s {
             PROCESSING => MediaFileState::Processing,
             READY => MediaFileState::Ready,

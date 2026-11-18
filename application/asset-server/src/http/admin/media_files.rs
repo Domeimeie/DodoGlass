@@ -2,19 +2,49 @@
 //! Missing ones, which the read API does not list, and the admin's changes
 //! to them.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use crate::catalogue::{Catalogue, Change, MediaFileStatus};
+use crate::catalogue::{Catalogue, Change, MediaFileState, MediaFileStatus};
 use crate::http::ApiError;
 
 pub fn routes() -> Router<Catalogue> {
     Router::new()
+        .route("/media-files", get(list))
         .route("/media-files/{id}", get(show).patch(edit).delete(remove))
         .route("/media-files/{id}/default", put(set_default))
+}
+
+#[derive(Deserialize)]
+struct ListQuery {
+    /// Comma-separated states (`failed,missing`); every state if absent.
+    state: Option<String>,
+}
+
+/// `GET /admin/media-files?state=failed,missing`: the Media files in those
+/// states, by upload key, each as `GET /admin/media-files/<id>` answers (the
+/// error of a Failed one, the key of a Missing one). 400 for an unknown state.
+async fn list(
+    State(catalogue): State<Catalogue>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Vec<MediaFileStatus>>, ApiError> {
+    let states = match query.state {
+        None => vec![
+            MediaFileState::Processing,
+            MediaFileState::Ready,
+            MediaFileState::Failed,
+            MediaFileState::Missing,
+        ],
+        Some(states) => states
+            .split(',')
+            .map(|s| MediaFileState::parse(s.trim()))
+            .collect::<Result<_, _>>()
+            .map_err(|e| ApiError::bad_request(e.to_string()))?,
+    };
+    Ok(Json(catalogue.media_files_in(states).await?))
 }
 
 /// A [`Change`] as an answer: 204, 404, 409 with the rule it breaks, or 400.

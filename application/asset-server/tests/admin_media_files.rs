@@ -478,3 +478,49 @@ async fn deleting_a_hidden_show_removes_its_seasons_episodes_and_media_files() {
     assert_eq!(app.get(&uri(SEASON_2)).await.0, 404);
     assert_eq!(delete(&app, &format!("/admin/shows/{show}")).await, 404);
 }
+
+// --- Failed and Missing -------------------------------------------------------
+
+#[tokio::test]
+async fn the_admin_api_lists_failed_media_files_with_their_error_and_missing_ones_with_their_key() {
+    let app = TestApp::start().await;
+    upload_ready(&app, MATRIX).await;
+    upload_ready(&app, PILOT).await;
+    app.upload(DIRECTORS_CUT).await;
+    app.fail_transcode(DIRECTORS_CUT, "ffprobe: invalid data")
+        .await;
+    lose_output(&app, PILOT).await;
+    app.reconcile().await;
+
+    assert_eq!(
+        app.get_json("/admin/media-files?state=failed").await,
+        json!([{
+            "id": id(DIRECTORS_CUT),
+            "key": DIRECTORS_CUT,
+            "label": "matrix-directors-cut",
+            "state": "failed",
+            "error": "ffprobe: invalid data",
+        }])
+    );
+    assert_eq!(
+        app.get_json("/admin/media-files?state=missing").await,
+        json!([{
+            "id": id(PILOT),
+            "key": PILOT,
+            "label": "S01E01",
+            "state": "missing",
+            "error": null,
+        }])
+    );
+    let both = app
+        .get_json("/admin/media-files?state=failed,missing")
+        .await;
+    assert_eq!(both.as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn an_unknown_state_is_a_bad_request() {
+    let app = TestApp::start().await;
+
+    assert_eq!(app.get("/admin/media-files?state=gone").await.0, 400);
+}
