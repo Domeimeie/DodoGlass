@@ -14,6 +14,7 @@ use serde_json::{Map, Value};
 use super::admin::Entry;
 use super::match_state::MatchState;
 use super::metadata::{LOCKABLE_FIELDS, LockedFields, LookupDue};
+use super::ratings::RATING_FIELDS;
 use super::schema::{
     episode_metadata, movie, movie_metadata, season_metadata, show, show_metadata,
 };
@@ -118,6 +119,20 @@ enum FieldValue {
     Year(i32),
 }
 
+/// Why `field` of `target` cannot be edited or locked, if it cannot: the
+/// Rating never is (ADR 0005).
+fn not_lockable(target: Target, field: &str) -> Result<(), String> {
+    if RATING_FIELDS.contains(&field) {
+        return Err(format!(
+            "{field:?} is part of the Rating, which is never locked: it is kept current from TMDB"
+        ));
+    }
+    if !target.lockable().contains(&field) {
+        return Err(format!("{} has no field {field:?}", target.what()));
+    }
+    Ok(())
+}
+
 /// The edits in `fields`, checked against what `target` has.
 fn parse_edits(
     target: Target,
@@ -130,9 +145,7 @@ fn parse_edits(
     fields
         .into_iter()
         .map(|(field, value)| {
-            if !target.lockable().contains(&field.as_str()) {
-                return Err(format!("{} has no field {field:?}", target.what()));
-            }
+            not_lockable(target, &field)?;
             let parsed = match (field.as_str(), value) {
                 ("year", Value::Number(n)) => n
                     .as_i64()
@@ -467,8 +480,7 @@ impl Catalogue {
                     let Some(target) = resolve(conn, entry)? else {
                         return Ok(Edited::NotFound);
                     };
-                    if !target.lockable().contains(&field.as_str()) {
-                        let message = format!("{} has no field {field:?}", target.what());
+                    if let Err(message) = not_lockable(target, &field) {
                         return Ok(Edited::Invalid(message));
                     }
                     ensure_metadata(conn, target)?;

@@ -3,12 +3,12 @@
 **Status: partly built.** See [Built so far](#built-so-far).
 
 The asset server owns the **catalogue**: which Movies, Shows, Seasons and Episodes exist, their
-descriptive information (name, year, imdbID, description, image) and which Media files belong to
-them. It plays both the *Library service* and the *Metadata service* of the
+descriptive information (name, year, imdbID, description, image, Rating) and which Media files
+belong to them. It plays both the *Library service* and the *Metadata service* of the
 [system architecture](architecture.md); they can be split later if enrichment needs its own scaling.
 
 Terms are defined in `GLOSSARY.md` at the repository root; the decisions behind this page are recorded
-in `docs/adr/` (ADR 0001–0004).
+in `docs/adr/` (ADR 0001–0005).
 
 | | |
 |---|---|
@@ -20,7 +20,7 @@ in `docs/adr/` (ADR 0001–0004).
 
 ## Built so far
 
-The tracer bullet (a Movie upload becomes listable), then Shows.
+The tracer bullet (a Movie upload becomes listable), then Shows, TMDB metadata and Ratings.
 
 - **Ingest listener** on `$share/assets/dodoglass/ingest`. It reads the standard S3 part of each
   event, URL-decodes the keys, handles several records per message, and acknowledges a message only
@@ -67,7 +67,9 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   once matched. `GET /shows/{id}/seasons` → `[{"number", "name", "description", "image"}]`,
   `GET /shows/{id}/seasons/{number}/episodes` → `[{"number", "name", "tmdb_id", "imdb_id",
   "description", "image", "air_date", "media_files": [...]}]` (Media files as for Movies; fields
-  TMDB did not give are left out). A Season or Episode TMDB does not name is "Season 2" /
+  TMDB did not give are left out). Movies, Shows and Episodes always have `rating` (TMDB's score,
+  0–10), `votes` and `rating_updated_at` (RFC 3339, UTC, e.g. `"2026-11-17T00:00:00Z"`), all `null`
+  without a Rating: no Match, or no votes on TMDB yet. Seasons have none. A Season or Episode TMDB does not name is "Season 2" /
   "Specials" / "Episode 3". `image` falls back: a Season without a poster has its Show's, an
   Episode without a still its Season's (so, failing that, its Show's). Hidden applies at every level: an Episode needs a Ready Media file, a Season a listed
   Episode, a Show a listed Season; a Hidden or unknown Show or Season answers 404. Processing,
@@ -77,7 +79,7 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
 - **TMDB for Movies and Shows** (the *matcher*): each new Movie or Show is looked up once,
   searching by its folder's name and year (`/search/movie`, `/search/tv` with the first-air year). Exactly one result with that year and the same name (ignoring case and punctuation)
   is a **Match**: name, year, imdbID, TMDB id, description and poster are filled in, except
-  **Locked fields**. Otherwise **Needs review** with the top 5 results kept as candidates. While TMDB
+  **Locked fields**, and the **Rating** (`vote_average`, `vote_count`), which is never locked. Otherwise **Needs review** with the top 5 results kept as candidates. While TMDB
   is unreachable or rate limiting (429, 5xx), the lookup is retried after 30 s, doubling up to 1 h,
   then hourly for as long as the outage lasts: an outage never fills Needs review. The entry stays
   `retrying` and shows its folder's name and year meanwhile. A
@@ -88,8 +90,10 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   `append_to_response=external_ids`. Without `--tmdb-api-key` no lookups run.
 - **Seasons and Episodes** of a matched Show are looked up by number (`/tv/{id}/season/{n}`,
   `/tv/{id}/season/{n}/episode/{e}`), with no search and no Needs review. A Season gets name,
-  description and poster, an Episode name, description, still, air date, TMDB id and imdbID. One
-  TMDB does not know (404, common for specials) keeps its number as its name. While TMDB is
+  description and poster, an Episode name, description, still, air date, TMDB id and imdbID, and
+  its Rating from the Season's details, which list every Episode with its score: a pass fetches
+  each Season once and shares it with its Episodes, so no Episode costs a request for its Rating.
+  One TMDB does not know (404, common for specials) keeps its number as its name. While TMDB is
   unavailable they keep their numbers and are retried with the same backoff, hourly once it is
   capped, until TMDB answers.
   One that appears later under a matched Show is looked up by the next pass, without searching the
@@ -147,8 +151,13 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   a field other than a Movie's or Show's name and year) set them and make them **Locked fields** →
   `{"locked_fields": [...]}`; 400 for a field the entry does not have or a wrong value.
   `DELETE <the same path>/locks/<field>` unlocks one → the Locked fields left; the next Match or
-  refresh fills it from TMDB again. Edits show in the read API also before a Match. An entry edited
+  refresh fills it from TMDB again. `rating`, `votes` and `rating_updated_at` are refused by both
+  (400): the Rating is never a Locked field, and a refresh or Match updates it also on an entry
+  with Locked fields. Edits show in the read API also before a Match. An entry edited
   before its first lookup is still looked up (its metadata row is created as due).
+- **Rating sweep:** every `--rating-sweep-interval` (default 1 h) the Ratings older than
+  `--rating-max-age` (default 7 days) are fetched again, oldest first, at most 20 entries per
+  sweep. See [Keeping Ratings current](#keeping-ratings-current).
 - **Database:** SQLite via Diesel, migrations in portable SQL run at startup. Tables so far: `movie`
   (with `folder_name`/`folder_year`, the placement identity, apart from the displayed `name`/`year`)
   and `media_file`; `show` (same folder identity), `season`, `episode`, and `media_file.episode_id`
@@ -159,14 +168,16 @@ The tracer bullet (a Movie upload becomes listable), then Shows.
   `retrying`, the TMDB fields, `locked_fields` in the same JSON-array shape; no row = not looked up
   yet). Lockable fields: Movie and Show `name`, `year`, `imdb_id`, `description`, `image`; Season
   `name`, `description`, `image`; Episode also `air_date`, `imdb_id`. A Match or lookup never writes
-  a locked field.
+  a locked field. `movie_metadata`, `show_metadata` and `episode_metadata` also hold the Rating:
+  `rating`, `votes` and `rating_updated_ms` (when it was last fetched; `NULL` for entries matched
+  before Ratings existed, which the sweep then fetches first).
 
 Not built yet: listing Hidden entries in the admin API (not part of the first spec).
 
 **Running it:** `go-task infra:up`, `go-task transcoder:serve-s3`, `go-task asset-server:serve`
 (HTTP on `127.0.0.1:8090`), then for example
 `go-task infra:upload KEY="movies/The Matrix (1999)/matrix.mkv" -- application/transcoder/sample.mp4`
-and `curl localhost:8090/movies` (set `ASSETS_TMDB_API_KEY` for metadata). Settings: `go-task asset-server:serve -- --help`, all also as
+and `curl localhost:8090/movies` (set `ASSETS_TMDB_API_KEY` for metadata and Ratings). Settings: `go-task asset-server:serve -- --help`, all also as
 `ASSETS_*` environment variables. Code layout and how to write tests:
 `application/asset-server/README.md`.
 
@@ -257,38 +268,65 @@ stateDiagram-v2
 - **Labels** are unique per Movie or Episode: `matrix.mkv` and `matrix.mp4` become "matrix" and
   "matrix (mp4)". An admin can rename them.
 
-## How imdbID, name, description and image get set
+## How imdbID, name, description, image and Rating get set
 
 ```mermaid
 flowchart TB
     New["new Movie or Show<br/>(name + year from the folder)"] --> Search["TMDB search: name + year"]
     Search -->|"TMDB down / rate limited"| Retry["retry with backoff, then hourly<br/>parsed name shown meanwhile"] --> Search
-    Search -->|"exactly one result:<br/>same year, same name"| Match["Match: name, year, imdbID, TMDB id,<br/>description, poster"]
+    Search -->|"exactly one result:<br/>same year, same name"| Match["Match: name, year, imdbID, TMDB id,<br/>description, poster, Rating"]
     Search -->|"none or several"| Review["Needs review<br/>top 5 candidates kept"]
     Review -->|"admin picks one"| Match
-    Match --> Cascade["Seasons + Episodes matched by number<br/>not in TMDB: number as name, no review"]
+    Match --> Cascade["Seasons + Episodes matched by number<br/>Episode Ratings from the Season's details<br/>not in TMDB: number as name, no review"]
     Match & Cascade -->|"download original image"| Assets[("bucket assets")]
-    Edit["admin edits a field"] --> Lock["Locked field:<br/>never overwritten"]
+    Edit["admin edits a field"] --> Lock["Locked field:<br/>never overwritten<br/>(a Rating is never locked)"]
     Refresh["admin: refresh / pick another Match"] --> Search
+    Sweep["rating sweep, hourly:<br/>Ratings older than 7 days"] -->|"Movie, Show, Season details"| Rated["Rating + when fetched<br/>nothing else changes"]
+    Match & Cascade -.->|"a max age later"| Sweep
 ```
 
 - **Automatic Match** only when exactly one TMDB result has the same year and the same name (ignoring
   case and punctuation). A wrong automatic Match is worse than one waiting for review.
 - **Shows** are searched by first-air year. Their Seasons and Episodes follow by number, without a
   search or review of their own; picking another Match for the Show refills them too.
-- **Fetched once**, when an entry first appears, and again only when an admin asks. No periodic
-  refresh.
+- **Fetched once**, when an entry first appears, and again only when an admin asks. The one
+  exception is the **Rating**, which the rating sweep keeps current (see
+  [Keeping Ratings current](#keeping-ratings-current)).
 - **Locks are per field.** Picking another Match or refreshing refills every field that is not
-  locked.
+  locked. The Rating is never locked: it is updated with every Match, refresh and sweep.
 - **No image** on TMDB: none is stored. A Season falls back to its Show's poster, an Episode to its
   Season's. Placeholders are the frontend's job.
 
-| Level | Fields from TMDB |
-|---|---|
-| Movie | name, year, imdbID, TMDB id, description, poster |
-| Show | name, first-air year, imdbID, TMDB id, description, poster |
-| Season | number, name, description, poster |
-| Episode | number, name, description, still, air date, imdbID |
+| Level | Fields from TMDB | Rating |
+|---|---|---|
+| Movie | name, year, imdbID, TMDB id, description, poster | `vote_average`, `vote_count` of its details |
+| Show | name, first-air year, imdbID, TMDB id, description, poster | `vote_average`, `vote_count` of its details |
+| Season | number, name, description, poster | none |
+| Episode | number, name, description, still, air date, imdbID | from its Season's details, which list every Episode |
+
+## Keeping Ratings current
+
+Everything above is fetched once; a Rating changes all the time, so it is refreshed periodically
+(ADR 0005). Each Movie, Show and Episode records when its Rating was last fetched.
+
+- **The sweep** runs in the asset server every `--rating-sweep-interval` (`ASSETS_RATING_SWEEP_INTERVAL`,
+  default `1h`), when a TMDB key is set. It takes the Ratings older than `--rating-max-age`
+  (`ASSETS_RATING_MAX_AGE`, default `7d`), oldest first and never-fetched ones before all, at most
+  20 entries per sweep.
+- **One request per entry:** a Movie's or Show's details, or a Season's details for all its matched
+  Episodes (they count as one entry). No request per Episode.
+- **Only Ratings change:** names, descriptions, images and Locked fields stay as they are.
+- **Only matched entries** have a Rating and are swept. Unmatched ones, and Episodes TMDB does not
+  know, have `rating: null`.
+- **TMDB unavailable** ends the sweep: the Ratings keep their value and timestamp, so they are still
+  the oldest and the next sweep tries them first (an hour later by default, like the lookups'
+  longest retry). Nothing goes to Needs review. TMDB refusing (it no longer knows the entry) keeps
+  the Rating and records the attempt, so the entry waits a maximum age instead of blocking every
+  sweep.
+- **Cost:** about one request per Movie, Show and Season per maximum age.
+
+Tests run a sweep explicitly (`TestApp::sweep_ratings`) after moving the fake clock past the
+maximum age.
 
 ## Data model
 
@@ -309,6 +347,9 @@ erDiagram
         string image_key
         string match_state "matched, needs_review, retrying"
         text locked_fields
+        float rating "TMDB score 0-10, never locked"
+        int votes
+        int rating_updated_ms "when last fetched"
     }
     SHOW {
         int id PK
@@ -320,6 +361,9 @@ erDiagram
         string image_key
         string match_state
         text locked_fields
+        float rating
+        int votes
+        int rating_updated_ms
     }
     SEASON {
         int id PK
@@ -340,6 +384,9 @@ erDiagram
         date air_date
         string imdb_id
         text locked_fields
+        float rating "from the Season details"
+        int votes
+        int rating_updated_ms
     }
     MEDIA_FILE {
         string id PK "task id"
@@ -366,14 +413,16 @@ stay within SQL that SQLite and Postgres both accept (ADR 0002).
 
 - Lists only entries that are not Hidden. Entries in Needs review are shown with the name and year
   from the folder, so a movie can be watched before its metadata is fixed.
+- Movies, Shows and Episodes carry their Rating: `rating` (number or `null`), `votes` (integer or
+  `null`) and `rating_updated_at` (timestamp or `null`).
 - Per Media file: its Label, whether it is the default, and the **manifest keys**
   (`final/<id>/hls/master.m3u8`, `final/<id>/dash/manifest.mpd`). Delivering the streams is the
   Playback service's job.
 - `GET /images/<key>` streams an image from `assets`.
 
 **Admin API** under `/admin/...`: list Needs review and Unassigned media files, pick a Match, edit
-fields (which locks them), attach an Unassigned media file, set the Default media file, rename a
-Label, remove a Media file, refresh.
+fields (which locks them; the Rating cannot be edited or locked), attach an Unassigned media file,
+set the Default media file, rename a Label, remove a Media file, refresh.
 
 ## Changes outside the asset server
 
@@ -389,6 +438,7 @@ Label, remove a Media file, refresh.
 - **No authentication** on the admin API: reachable from localhost only, like the development setup
   of MQTT and RustFS. Real authentication comes with the User service.
 - **One instance** while the database is SQLite.
-- **Several languages** of metadata at once, **periodic refresh** (episodes described after upload),
+- **Several languages** of metadata at once, **periodic refresh** of fields other than the Rating
+  (episodes described after upload),
   **image resizing** and **typed attributes** of Media files (edition, audio language) are left for
   later.

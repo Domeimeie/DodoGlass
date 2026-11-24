@@ -3,7 +3,9 @@
 The catalogue of Movies, Shows (Seasons, Episodes) and their Media files. It listens for uploads to
 the `ingest` bucket, places each one in the catalogue from its path (ADR 0003), and marks it Ready
 once the transcoder's output marker appears in `final` (ADR 0001). New Movies and Shows are matched against
-TMDB (a Show's Seasons and Episodes by number), and their images stored in `assets`. The HTTP API serves the catalogue and the images.
+TMDB (a Show's Seasons and Episodes by number), and their images stored in `assets`. Their
+Ratings (TMDB's user score) are kept current by a periodic sweep (ADR 0005). The HTTP API serves
+the catalogue and the images.
 
 Design: [Asset server architecture page](../../docs/architecture/asset-server.md). Terms:
 `GLOSSARY.md` at the repository root.
@@ -31,6 +33,16 @@ exported in the shell takes precedence. Without one, Movies and Shows keep the n
 `ASSETS_*` environment variable. The database is `assets.db` in this folder by default; migrations
 run at startup.
 
+With a TMDB key, a rating sweep fetches the Ratings that have become too old again:
+
+| Flag | Environment variable | Default | |
+|---|---|---|---|
+| `--rating-max-age` | `ASSETS_RATING_MAX_AGE` | `7d` | Ratings older than this are fetched again |
+| `--rating-sweep-interval` | `ASSETS_RATING_SWEEP_INTERVAL` | `1h` | time between two sweeps |
+
+Both take a duration such as `7d`, `36h` or `1h 30m`. A sweep fetches at most 20 entries, oldest
+first.
+
 Other tasks (from this folder): `go-task test`, `go-task lint`, `go-task fmt`, `go-task check`
 (fmt, clippy, tests).
 
@@ -38,12 +50,12 @@ Other tasks (from this folder): `go-task test`, `go-task lint`, `go-task fmt`, `
 
 | Module | What it does |
 |---|---|
-| `catalogue/` | The core: placing uploads (`placement.rs`), Media file states, Labels and the Default media file per owner (`media_files.rs`), Movies and what viewers see (`movies.rs`), Shows, Seasons and Episodes (`shows.rs`), Unassigned media files and attaching them (`unassigned.rs`), TMDB outcomes (`match_state.rs`: the `MatchState` of an entry) and Locked fields of Movies (`metadata.rs`) and of Shows, Seasons and Episodes (`show_metadata.rs`), fields edited by hand (locking them), unlocking, and what a picked Match or refresh applies to (`corrections.rs`), the admin's changes: default, Labels, removing Media files, deleting Hidden entries (`admin.rs`). Everything else goes through it |
+| `catalogue/` | The core: placing uploads (`placement.rs`), Media file states, Labels and the Default media file per owner (`media_files.rs`), Movies and what viewers see (`movies.rs`), Shows, Seasons and Episodes (`shows.rs`), Unassigned media files and attaching them (`unassigned.rs`), TMDB outcomes (`match_state.rs`: the `MatchState` of an entry) and Locked fields of Movies (`metadata.rs`) and of Shows, Seasons and Episodes (`show_metadata.rs`), Ratings and what the rating sweep reads and writes (`ratings.rs`), fields edited by hand (locking them), unlocking, and what a picked Match or refresh applies to (`corrections.rs`), the admin's changes: default, Labels, removing Media files, deleting Hidden entries (`admin.rs`). Everything else goes through it |
 | `ports/` | Upload events (`upload_events.rs`, MQTT in `mqtt.rs`), status hints (`status_hints.rs`, MQTT in `mqtt_status.rs`; both MQTT connections in `mqtt_client.rs`), buckets (`storage.rs`), the clock (`clock.rs`), TMDB (`tmdb.rs`: the `Tmdb` trait and the reqwest client) |
 | `ingest/` | The ingest listener: S3 events → `Catalogue::upload_seen`, ack after storing |
 | `reconcile.rs` | Output markers in `final` → Ready, Missing, Failed after 24 h; unseen outputs placed from their marker |
 | `status.rs` | The status listener: `completed` → early reconcile of that Media file, `failed` → Failed |
-| `matcher/` | TMDB lookups for new Movies and Shows (strict Match, Needs review, retries with backoff), Seasons and Episodes of matched Shows by number, image download (`mod.rs`); the lookups an admin asks for: picking a Match, refresh, attaching to a new Movie or Show from a TMDB id (`admin.rs`) |
+| `matcher/` | TMDB lookups for new Movies and Shows (strict Match, Needs review, retries with backoff), Seasons and Episodes of matched Shows by number, image download (`mod.rs`); the lookups an admin asks for: picking a Match, refresh, attaching to a new Movie or Show from a TMDB id (`admin.rs`); the rating sweep (`sweep.rs`) |
 | `http/` | axum routes, one module per part of the API (`movies.rs`, `shows.rs`, `images.rs`), merged in `mod.rs`. Handlers take `State<Catalogue>`, or `State<Matcher>` for what needs TMDB (both from `ApiState`). The admin API is `http/admin/` (`media_files.rs`, `hidden.rs`, `review.rs`, `unassigned.rs`, `corrections.rs`: Match, refresh, edit and unlock), nested under `/admin`: add a module there and merge its `routes()` (paths relative to `/admin`) in `admin/mod.rs` |
 | `app.rs` | Builds everything; used by `main.rs` and by the tests |
 | `db.rs`, `migrations/` | SQLite connection, portable-SQL migrations (ADR 0002) |
@@ -82,15 +94,21 @@ What `TestApp` offers:
   `send_status(json)` (e.g. `common::status_message(key, event, error)`); each returns once the status
   listener has handled it.
 - **TMDB:** `app.tmdb` is a `FakeTmdb` (`tests/common/tmdb.rs`), empty by default (every search
-  finds nothing). `add_movie(common::tmdb::movie(603, "The Matrix", 1999))`,
+  finds nothing). `add_movie(common::tmdb::movie(603, "The Matrix", 1999))` (with a Rating:
+  `MovieDetails { rating: tmdb::rated(8.2, 26_000), ..tmdb::movie(...) }`, the same for Shows),
   `add_show(tmdb::show(1396, "Breaking Bad", 2008))`, `add_season(1396, 1, tmdb::season("Season
   1"))`, `add_episode(1396, 1, 2, tmdb::episode(62086, "Cat's in the Bag...", "2008-01-27"))`
   (Seasons and Episodes it lacks answer "not found"; adding one again with the same id replaces
-  it: "TMDB's entry changed"), `add_image(path, bytes)`,
-  `set_unreachable(true)`, `calls()`, `searches()`.
+  it: "TMDB's entry changed"), `rate_episode(1396, 1, 2, tmdb::rated(8.1, 900))` (an Episode's
+  Rating, as its Season's details list it), `add_image(path, bytes)`,
+  `set_unreachable(true)`, `calls()`, `searches()`, `season_calls()`.
 - **Triggers:** `reconcile()`, `match_metadata()` (one pass of TMDB lookups and due retries),
-  `restart()` (same database and buckets, so the startup reconcile runs:
-  "the asset server was down"), `advance(duration)` to move the fake clock.
+  `sweep_ratings()` (one rating sweep: the Ratings older than the maximum age, oldest first, up to
+  a batch), `restart()` (same database and buckets, so the startup reconcile runs:
+  "the asset server was down"), `advance(duration)` to move the fake clock (e.g. past the 7-day
+  maximum age before a sweep).
+- **Settings:** `TestApp::start_with(|config| config.rating_sweep_batch = 2)` changes the
+  `app::Config` (also `rating_max_age`); `start()` uses the defaults.
 - **HTTP:** `get(uri)` → `(status, json)`, `get_json(uri)` (asserts 200), `get_bytes(uri)` →
   `(status, content type, body)`, `send_json(method, uri,
   body)`, `request(request)`.

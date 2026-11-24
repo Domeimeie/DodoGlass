@@ -166,14 +166,19 @@ Open in a browser or with `curl -s … | python3 -m json.tool`. There is no page
 
 | URL | Shows |
 |---|---|
-| `/movies`, `/movies/<id>` | Movies with description, imdbID, poster and their Media files (manifests) |
-| `/shows` | Shows with description, imdbID and poster; **no files**: those belong to Episodes |
+| `/movies`, `/movies/<id>` | Movies with description, imdbID, poster, Rating and their Media files (manifests) |
+| `/shows` | Shows with description, imdbID, poster and Rating; **no files**: those belong to Episodes |
 | `/shows/<id>/seasons` | the Seasons of a Show |
-| `/shows/<id>/seasons/<n>/episodes` | the Episodes with name, description, still, air date and their Media files |
+| `/shows/<id>/seasons/<n>/episodes` | the Episodes with name, description, still, air date, Rating and their Media files |
 | `/images/<image>` | a poster or still; `<image>` is the `image` field, e.g. `posters/….jpg` |
 | `/admin/needs-review` | Movies and Shows without a certain Match, with candidates |
 | `/admin/unassigned-media-files` | uploads that did not fit the layout, with the reason |
 | `/admin/media-files?state=failed,missing` | failed transcodes and vanished outputs |
+
+The **Rating** is in `rating` (TMDB's score, 0–10), `votes` and `rating_updated_at` (when it was
+fetched) of each Movie, Show and Episode; all three are `null` until the entry has a Match. It is
+fetched with the Match and kept current by a sweep every hour, which fetches Ratings older than 7
+days again (`--rating-sweep-interval`, `--rating-max-age`).
 
 A video shows up once its transcode is complete (the transcoder's `completed` message, at the latest
 at the next reconcile, every 300 s). Correcting matches, editing fields and attaching files: see the
@@ -216,4 +221,5 @@ All from the repository root:
 | Asset server: `cannot listen on 127.0.0.1:8090` | Another asset server is already running, or another program uses the port: stop it, or `--http-addr 127.0.0.1:8091` |
 | `http://127.0.0.1:8090` shows nothing / 404 | There is no page at `/`; open `/movies` or `/shows` |
 | A Movie or Show has no description or poster | No `ASSETS_TMDB_API_KEY` (see step 6), or it is in `/admin/needs-review`: name or year differ from TMDB's |
+| `rating` is `null` | No Match yet (as above), or nobody has voted on TMDB yet |
 | A video does not appear at all | Its transcode is not complete yet (`/admin/media-files/<id>`), or its path did not fit: `/admin/unassigned-media-files` |

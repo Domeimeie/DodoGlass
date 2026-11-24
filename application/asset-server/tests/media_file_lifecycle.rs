@@ -116,6 +116,9 @@ async fn an_output_whose_event_was_lost_is_placed_as_ready_by_the_reconcile() {
             "id": 1,
             "name": "The Matrix",
             "year": 1999,
+            "rating": null,
+            "votes": null,
+            "rating_updated_at": null,
             "media_files": [{
                 "id": MATRIX_ID,
                 "label": "matrix",

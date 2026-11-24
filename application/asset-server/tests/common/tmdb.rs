@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use asset_server::ports::tmdb::{
-    EpisodeDetails, MovieDetails, MovieSummary, SeasonDetails, ShowDetails, ShowSummary, Tmdb,
-    TmdbError,
+    EpisodeDetails, EpisodeRating, MovieDetails, MovieSummary, Rating, SeasonDetails, ShowDetails,
+    ShowSummary, Tmdb, TmdbError,
 };
 use async_trait::async_trait;
 
@@ -24,10 +24,13 @@ struct State {
     shows: Vec<ShowDetails>,
     seasons: HashMap<(i64, i32), SeasonDetails>,
     episodes: HashMap<(i64, i32, i32), EpisodeDetails>,
+    /// The Ratings of Episodes, as their Season's details list them.
+    episode_ratings: HashMap<(i64, i32, i32), Rating>,
     images: HashMap<String, Vec<u8>>,
     unreachable: bool,
     calls: usize,
     searches: usize,
+    season_calls: usize,
 }
 
 /// A Movie TMDB knows; `poster` is its image path (`/abc.jpg`).
@@ -39,7 +42,13 @@ pub fn movie(tmdb_id: i64, title: &str, year: i32) -> MovieDetails {
         imdb_id: Some(format!("tt{tmdb_id:07}")),
         overview: Some(format!("About {title}.")),
         poster_path: None,
+        rating: None,
     }
+}
+
+/// A Rating: TMDB's score with its number of votes.
+pub fn rated(score: f64, votes: i64) -> Option<Rating> {
+    Some(Rating { score, votes })
 }
 
 /// A Show TMDB knows, first aired in `year`, without a poster.
@@ -51,15 +60,18 @@ pub fn show(tmdb_id: i64, name: &str, year: i32) -> ShowDetails {
         imdb_id: Some(format!("tt{tmdb_id:07}")),
         overview: Some(format!("About {name}.")),
         poster_path: None,
+        rating: None,
     }
 }
 
-/// A Season TMDB knows, without a poster.
+/// A Season TMDB knows, without a poster. The fake lists the Ratings of
+/// its Episodes (see [`FakeTmdb::rate_episode`]) in its details.
 pub fn season(name: &str) -> SeasonDetails {
     SeasonDetails {
         name: Some(name.into()),
         overview: Some(format!("About {name}.")),
         poster_path: None,
+        episodes: Vec::new(),
     }
 }
 
@@ -104,6 +116,16 @@ impl FakeTmdb {
         state.episodes.insert((show, season, number), episode);
     }
 
+    /// The Rating of Episode `number` of Season `season` of Show `show`, as
+    /// the Season's details list it (`None`: no votes yet).
+    pub fn rate_episode(&self, show: i64, season: i32, number: i32, rating: Option<Rating>) {
+        let ratings = &mut self.state.lock().unwrap().episode_ratings;
+        match rating {
+            Some(rating) => ratings.insert((show, season, number), rating),
+            None => ratings.remove(&(show, season, number)),
+        };
+    }
+
     pub fn add_image(&self, path: &str, bytes: &[u8]) {
         let mut state = self.state.lock().unwrap();
         state.images.insert(path.into(), bytes.to_vec());
@@ -122,6 +144,11 @@ impl FakeTmdb {
     /// How many of them were searches (Movie or TV).
     pub fn searches(&self) -> usize {
         self.state.lock().unwrap().searches
+    }
+
+    /// How many of them asked for a Season's details.
+    pub fn season_calls(&self) -> usize {
+        self.state.lock().unwrap().season_calls
     }
 
     fn call(&self) -> Result<std::sync::MutexGuard<'_, State>, TmdbError> {
@@ -209,9 +236,27 @@ impl Tmdb for FakeTmdb {
             .ok_or_else(|| TmdbError::Rejected(format!("no show {tmdb_id}")))
     }
 
+    /// The Season with the Ratings of the Episodes the fake knows in it.
     async fn season(&self, tv_id: i64, number: i32) -> Result<Option<SeasonDetails>, TmdbError> {
+        self.state.lock().unwrap().season_calls += 1;
         let state = self.call()?;
-        Ok(state.seasons.get(&(tv_id, number)).cloned())
+        let Some(season) = state.seasons.get(&(tv_id, number)) else {
+            return Ok(None);
+        };
+        let mut episodes: Vec<EpisodeRating> = state
+            .episodes
+            .keys()
+            .filter(|(show, s, _)| (*show, *s) == (tv_id, number))
+            .map(|key| EpisodeRating {
+                number: key.2,
+                rating: state.episode_ratings.get(key).copied(),
+            })
+            .collect();
+        episodes.sort_by_key(|e| e.number);
+        Ok(Some(SeasonDetails {
+            episodes,
+            ..season.clone()
+        }))
     }
 
     async fn episode(

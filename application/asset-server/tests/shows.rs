@@ -32,7 +32,14 @@ async fn an_episode_upload_builds_its_show_season_and_episode() {
     let show = only_show_id(&app).await;
     assert_eq!(
         app.get_json("/shows").await,
-        json!([{ "id": show, "name": "Breaking Bad", "year": 2008 }])
+        json!([{
+            "id": show,
+            "name": "Breaking Bad",
+            "year": 2008,
+            "rating": null,
+            "votes": null,
+            "rating_updated_at": null,
+        }])
     );
     assert_eq!(
         app.get_json(&format!("/shows/{show}/seasons")).await,
@@ -44,6 +51,9 @@ async fn an_episode_upload_builds_its_show_season_and_episode() {
         json!([{
             "number": 2,
             "name": "Episode 2",
+            "rating": null,
+            "votes": null,
+            "rating_updated_at": null,
             "media_files": [{
                 "id": S01E02_ID,
                 "label": "S01E02",

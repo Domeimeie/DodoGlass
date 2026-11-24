@@ -18,9 +18,11 @@ use serde::Serialize;
 use super::Catalogue;
 use super::match_state::MatchState;
 use super::metadata::{Candidate, LockedFields, LookupDue};
+use super::ratings::{self, RatingView};
 use super::schema::{
     episode, episode_metadata, season, season_metadata, show, show_candidate, show_metadata,
 };
+use crate::ports::tmdb::Rating;
 
 /// The fields an admin can lock on a Show (as stored in `locked_fields`).
 pub const SHOW_LOCKABLE_FIELDS: [&str; 5] = ["name", "year", "imdb_id", "description", "image"];
@@ -40,6 +42,8 @@ pub struct ShowMatch {
     pub description: Option<String>,
     /// Key of the downloaded poster in `assets`.
     pub image_key: Option<String>,
+    /// Never locked: always written.
+    pub rating: Option<Rating>,
 }
 
 /// A Season or Episode of a matched Show due for a lookup by number.
@@ -79,6 +83,8 @@ pub struct EpisodeMatch {
     pub image_key: Option<String>,
     pub air_date: Option<String>,
     pub imdb_id: Option<String>,
+    /// From its Season's details; never locked.
+    pub rating: Option<Rating>,
 }
 
 /// A Show in Needs review, as the admin API lists it.
@@ -103,6 +109,8 @@ pub struct ShowMetadataView {
     /// Key of the poster, served at `GET /images/<key>`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    #[serde(flatten)]
+    pub rating: RatingView,
 }
 
 #[derive(Queryable, Selectable)]
@@ -113,6 +121,9 @@ pub(super) struct ShowMetadataRow {
     pub imdb_id: Option<String>,
     pub description: Option<String>,
     pub image_key: Option<String>,
+    pub rating: Option<f64>,
+    pub votes: Option<i64>,
+    pub rating_updated_ms: Option<i64>,
 }
 
 impl From<ShowMetadataRow> for ShowMetadataView {
@@ -122,6 +133,7 @@ impl From<ShowMetadataRow> for ShowMetadataView {
             imdb_id: row.imdb_id,
             description: row.description,
             image: row.image_key,
+            rating: RatingView::from_columns(row.rating, row.votes, row.rating_updated_ms),
         }
     }
 }
@@ -147,6 +159,9 @@ pub(super) struct EpisodeMetadataRow {
     pub air_date: Option<String>,
     pub imdb_id: Option<String>,
     pub locked_fields: String,
+    pub rating: Option<f64>,
+    pub votes: Option<i64>,
+    pub rating_updated_ms: Option<i64>,
 }
 
 /// The metadata of these Shows: what a Match filled in, and fields an admin
@@ -182,7 +197,7 @@ pub(super) fn episode_rows(
 
 /// Makes every Season and Episode of Show `show_id` due for a lookup by
 /// number. With `clear`, what they had from TMDB is cleared first, except
-/// their Locked fields.
+/// their Locked fields (the Ratings of Episodes too: they are never locked).
 fn look_up_parts_again(conn: &mut SqliteConnection, show_id: i32, clear: bool) -> Result<()> {
     let seasons: Vec<i32> = season::table
         .filter(season::show_id.eq(show_id))
@@ -234,6 +249,9 @@ fn look_up_parts_again(conn: &mut SqliteConnection, show_id: i32, clear: bool) -
                     episode_metadata::air_date
                         .eq(unless_locked(&locks, "air_date", None, c.air_date)),
                     episode_metadata::imdb_id.eq(unless_locked(&locks, "imdb_id", None, c.imdb_id)),
+                    episode_metadata::rating.eq(None::<f64>),
+                    episode_metadata::votes.eq(None::<i64>),
+                    episode_metadata::rating_updated_ms.eq(None::<i64>),
                 ))
                 .execute(conn)?;
         }
@@ -260,12 +278,15 @@ fn unless_locked<T>(locks: &LockedFields, field: &str, new: T, old: T) -> T {
     if locks.contains(field) { old } else { new }
 }
 
-/// [`Catalogue::show_matched`], inside a transaction of the caller's.
+/// [`Catalogue::show_matched`] at `now_ms`, inside a transaction of the
+/// caller's.
 pub(super) fn apply_show_match(
     conn: &mut SqliteConnection,
     show_id: i32,
     found: ShowMatch,
+    now_ms: i64,
 ) -> Result<()> {
+    let (rating, votes) = ratings::columns(found.rating);
     let current: Option<(String, ShowMetadataRow)> = show_metadata::table
         .find(show_id)
         .select((show_metadata::locked_fields, ShowMetadataRow::as_select()))
@@ -304,6 +325,9 @@ pub(super) fn apply_show_match(
         show_metadata::imdb_id.eq(imdb_id),
         show_metadata::description.eq(description),
         show_metadata::image_key.eq(image_key),
+        show_metadata::rating.eq(rating),
+        show_metadata::votes.eq(votes),
+        show_metadata::rating_updated_ms.eq(Some(now_ms)),
     );
     diesel::insert_into(show_metadata::table)
         .values((show_metadata::show_id.eq(show_id), values.clone()))
@@ -358,8 +382,9 @@ impl Catalogue {
     /// before, what they had from the old one is cleared first (Locked fields
     /// are kept), so nothing of it stays should TMDB not answer.
     pub async fn show_matched(&self, show_id: i32, found: ShowMatch) -> Result<()> {
+        let now = self.clock.now_ms();
         self.db
-            .run(move |conn| conn.transaction(|conn| apply_show_match(conn, show_id, found)))
+            .run(move |conn| conn.transaction(|conn| apply_show_match(conn, show_id, found, now)))
             .await
     }
 
@@ -617,12 +642,14 @@ impl Catalogue {
     }
 
     /// The Episode was looked up: `found` is what TMDB knows of it, `None` if
-    /// it does not know it (the number stays its name). Locked fields are kept.
+    /// it does not know it (the number stays its name, and it has no
+    /// Rating). Locked fields are kept; the Rating is always written.
     pub async fn episode_looked_up(
         &self,
         episode_id: i32,
         found: Option<EpisodeMatch>,
     ) -> Result<()> {
+        let now = self.clock.now_ms();
         self.db
             .run(move |conn| {
                 conn.transaction(|conn| {
@@ -633,6 +660,8 @@ impl Catalogue {
                     };
                     let found = found.unwrap_or_default();
                     let tmdb_id = (state == MatchState::Matched).then_some(found.tmdb_id);
+                    let rated_at = (state == MatchState::Matched).then_some(now);
+                    let (rating, votes) = ratings::columns(found.rating);
                     let current = episode_rows(conn, &[episode_id])?.pop();
                     let (name, description, image_key, air_date, imdb_id) = match current {
                         Some(c) => {
@@ -668,6 +697,9 @@ impl Catalogue {
                         episode_metadata::image_key.eq(image_key),
                         episode_metadata::air_date.eq(air_date),
                         episode_metadata::imdb_id.eq(imdb_id),
+                        episode_metadata::rating.eq(rating),
+                        episode_metadata::votes.eq(votes),
+                        episode_metadata::rating_updated_ms.eq(rated_at),
                     );
                     diesel::insert_into(episode_metadata::table)
                         .values((episode_metadata::episode_id.eq(episode_id), values.clone()))

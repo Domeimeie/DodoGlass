@@ -71,6 +71,9 @@ diesel::table! {
         description -> Nullable<Text>,
         image_key -> Nullable<Text>,
         locked_fields -> Text,
+        rating -> Nullable<Double>,
+        votes -> Nullable<BigInt>,
+        rating_updated_ms -> Nullable<BigInt>,
     }
 }
 
@@ -103,6 +106,9 @@ diesel::table! {
         description -> Nullable<Text>,
         image_key -> Nullable<Text>,
         locked_fields -> Text,
+        rating -> Nullable<Double>,
+        votes -> Nullable<BigInt>,
+        rating_updated_ms -> Nullable<BigInt>,
     }
 }
 
@@ -144,6 +150,9 @@ diesel::table! {
         air_date -> Nullable<Text>,
         imdb_id -> Nullable<Text>,
         locked_fields -> Text,
+        rating -> Nullable<Double>,
+        votes -> Nullable<BigInt>,
+        rating_updated_ms -> Nullable<BigInt>,
     }
 }
 

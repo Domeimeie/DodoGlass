@@ -24,6 +24,9 @@ async fn a_marker_event_for_a_movie_path_lists_the_movie_with_a_ready_media_file
             "id": 1,
             "name": "The Matrix",
             "year": 1999,
+            "rating": null,
+            "votes": null,
+            "rating_updated_at": null,
             "media_files": [{
                 "id": MATRIX_ID,
                 "label": "matrix",

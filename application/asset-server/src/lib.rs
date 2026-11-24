@@ -6,7 +6,7 @@
 //! - [`markers`]: the marker listener (new output markers in `final` → Ready);
 //! - [`reconcile`]: the reconciler (output markers in `final` → Ready);
 //! - [`matcher`]: TMDB lookups for new Movies and Shows (Match, Needs review,
-//!   retries), and Seasons and Episodes of matched Shows;
+//!   retries), Seasons and Episodes of matched Shows, and the rating sweep;
 //! - [`http`]: the HTTP API;
 //! - [`app`]: puts them together, for `main` and for the tests.
 

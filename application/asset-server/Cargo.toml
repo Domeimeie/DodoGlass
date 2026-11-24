@@ -13,6 +13,7 @@ diesel = { version = "2.4", features = ["sqlite", "returning_clauses_for_sqlite_
 diesel_migrations = { version = "2.4", features = ["sqlite"] }
 dodoglass-ids = { path = "../dodoglass-ids" }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+humantime = "2.4"
 # Only to switch on `bundled`: there is no system libsqlite3 to link against.
 libsqlite3-sys = { version = "0.40", features = ["bundled"] }
 object_store = { version = "0.14.2", default-features = false, features = ["aws"] }
