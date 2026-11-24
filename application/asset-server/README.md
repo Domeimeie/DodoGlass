@@ -23,8 +23,9 @@ curl -s localhost:8090/movies       # listed once the transcoder's `completed` s
                                     # (or after the next reconcile: every 300 s, --reconcile-interval)
 ```
 
-TMDB lookups need an API key (v3 key or v4 read access token): `ASSETS_TMDB_API_KEY=... go-task
-asset-server:serve`. Without one, Movies and Shows keep the name and year from their folder.
+TMDB lookups need an API key (v3 key or v4 read access token). Put it into a `.env` file in this
+folder, which git ignores and `go-task asset-server:serve` loads: `ASSETS_TMDB_API_KEY=...`. A value
+exported in the shell takes precedence. Without one, Movies and Shows keep the name and year from their folder.
 
 `go-task asset-server:serve -- --help` lists every setting. Each one can also be set with an
 `ASSETS_*` environment variable. The database is `assets.db` in this folder by default; migrations

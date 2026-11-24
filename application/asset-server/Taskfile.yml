@@ -13,6 +13,8 @@ tasks:
 
   serve:
     desc: 'Run against the local infra (first: go-task infra:up), e.g. go-task asset-server:serve -- --reconcile-interval 30'
+    # Secrets such as ASSETS_TMDB_API_KEY go into .env here (git-ignored); the shell's value wins
+    dotenv: ['.env']
     env:
       ASSETS_MQTT_URL: mqtt://localhost:1883
       ASSETS_S3_ENDPOINT: http://localhost:9000
