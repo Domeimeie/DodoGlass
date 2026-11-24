@@ -104,9 +104,29 @@ struct Cli {
           value_parser = clap::value_parser!(u64).range(1..))]
     tmdb_interval: u64,
 
+    /// Ratings (TMDB's user scores) older than this are fetched again by the rating sweep,
+    /// e.g. 7d, 36h
+    #[arg(long, env = "ASSETS_RATING_MAX_AGE", default_value = "7d",
+          value_parser = positive_duration)]
+    rating_max_age: Duration,
+
+    /// Time between two rating sweeps, e.g. 1h, 30m
+    #[arg(long, env = "ASSETS_RATING_SWEEP_INTERVAL", default_value = "1h",
+          value_parser = positive_duration)]
+    rating_sweep_interval: Duration,
+
     /// Log format: text for people, json for log collectors
     #[arg(long, env = "ASSETS_LOG_FORMAT", value_enum, default_value_t = LogFormat::Text)]
     log_format: LogFormat,
+}
+
+/// A duration such as `7d`, `1h 30m` or `90s`; not zero.
+fn positive_duration(s: &str) -> Result<Duration, String> {
+    match humantime::parse_duration(s) {
+        Ok(d) if d.is_zero() => Err("must be longer than zero".into()),
+        Ok(d) => Ok(d),
+        Err(e) => Err(format!("{e} (e.g. 7d, 1h, 30m)")),
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -155,6 +175,8 @@ async fn run(cli: Cli) -> Result<()> {
     let config = Config {
         database: cli.database.clone(),
         final_bucket: cli.final_bucket,
+        rating_max_age: cli.rating_max_age,
+        ..Config::default()
     };
     let tmdb: Arc<dyn Tmdb> = match &cli.tmdb_api_key {
         Some(key) => Arc::new(TmdbClient::new(TmdbSettings::new(key, &cli.tmdb_language))?),
@@ -182,7 +204,13 @@ async fn run(cli: Cli) -> Result<()> {
     app.spawn_periodic_reconcile(Duration::from_secs(cli.reconcile_interval));
     if cli.tmdb_api_key.is_some() {
         app.spawn_periodic_matcher(Duration::from_secs(cli.tmdb_interval));
-        info!(language = %cli.tmdb_language, "TMDB lookups on");
+        app.spawn_periodic_rating_sweep(cli.rating_sweep_interval);
+        info!(
+            language = %cli.tmdb_language,
+            rating_max_age = %humantime::format_duration(cli.rating_max_age),
+            rating_sweep_interval = %humantime::format_duration(cli.rating_sweep_interval),
+            "TMDB lookups and rating sweep on"
+        );
     } else {
         warn!("no TMDB API key (--tmdb-api-key): Movies and Shows are not looked up");
     }
@@ -239,4 +267,93 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     let _ = ctrl_c.await;
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::*;
+
+    /// The settings every start needs.
+    const REQUIRED: [&str; 7] = [
+        "asset-server",
+        "--s3-endpoint",
+        "http://localhost:9000",
+        "--s3-access-key",
+        "key",
+        "--s3-secret-key",
+        "secret",
+    ];
+
+    /// The environment variable and default of setting `id`.
+    fn env_and_default(id: &str) -> (String, String) {
+        let command = Cli::command();
+        let arg = command
+            .get_arguments()
+            .find(|a| a.get_id() == id)
+            .unwrap_or_else(|| panic!("no setting {id}"));
+        let env = arg.get_env().expect("an environment variable");
+        let default = arg.get_default_values();
+        (
+            env.to_string_lossy().into(),
+            default[0].to_string_lossy().into(),
+        )
+    }
+
+    #[test]
+    fn the_rating_settings_have_environment_variables_and_defaults() {
+        assert_eq!(
+            env_and_default("rating_max_age"),
+            ("ASSETS_RATING_MAX_AGE".into(), "7d".into())
+        );
+        assert_eq!(
+            env_and_default("rating_sweep_interval"),
+            ("ASSETS_RATING_SWEEP_INTERVAL".into(), "1h".into())
+        );
+        assert_eq!(
+            positive_duration("7d"),
+            Ok(asset_server::matcher::RATING_MAX_AGE)
+        );
+        assert_eq!(
+            positive_duration("1h"),
+            Ok(asset_server::matcher::RATING_SWEEP_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn the_rating_settings_can_be_given_as_flags() {
+        let mut args = REQUIRED.to_vec();
+        args.extend(["--rating-max-age", "36h", "--rating-sweep-interval", "15m"]);
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert_eq!(cli.rating_max_age, Duration::from_secs(36 * 3600));
+        assert_eq!(cli.rating_sweep_interval, Duration::from_secs(15 * 60));
+    }
+
+    #[test]
+    fn the_rating_settings_can_be_given_as_environment_variables() {
+        // SAFETY: no other test of this binary reads these two variables
+        // without giving the setting as a flag (which wins over them).
+        unsafe {
+            std::env::set_var("ASSETS_RATING_MAX_AGE", "3d");
+            std::env::set_var("ASSETS_RATING_SWEEP_INTERVAL", "2h");
+        }
+        let cli = Cli::try_parse_from(REQUIRED);
+        unsafe {
+            std::env::remove_var("ASSETS_RATING_MAX_AGE");
+            std::env::remove_var("ASSETS_RATING_SWEEP_INTERVAL");
+        }
+        let cli = cli.unwrap();
+        assert_eq!(cli.rating_max_age, Duration::from_secs(3 * 24 * 3600));
+        assert_eq!(cli.rating_sweep_interval, Duration::from_secs(2 * 3600));
+    }
+
+    #[test]
+    fn a_rating_setting_must_be_a_duration_longer_than_zero() {
+        for bad in ["0s", "soon", "7"] {
+            let mut args = REQUIRED.to_vec();
+            args.extend(["--rating-max-age", bad]);
+            assert!(Cli::try_parse_from(args).is_err(), "{bad}");
+        }
+    }
 }

@@ -51,7 +51,7 @@ pub use metadata::{
     NeedsReviewMovie,
 };
 pub use movies::{MediaFileView, MovieView};
-pub use ratings::{RATING_FIELDS, RatingView};
+pub use ratings::{RATING_FIELDS, RatingView, StaleRating};
 pub use show_metadata::{
     EPISODE_LOCKABLE_FIELDS, EpisodeMatch, NeedsReviewShow, Part, PartLookupDue,
     SEASON_LOCKABLE_FIELDS, SHOW_LOCKABLE_FIELDS, SeasonMatch, ShowMatch, ShowMetadataView,

@@ -16,12 +16,17 @@
 //!   same backoff while TMDB is unavailable. One that appears later is looked
 //!   up by the next pass, without searching the Show again.
 //!
+//! - **Ratings** are the exception to "once": the rating sweep
+//!   ([`Matcher::sweep_ratings`], `sweep.rs`) fetches those older than a
+//!   maximum age again (ADR 0005).
+//!
 //! A pass ([`Matcher::run_once`]) handles every entry that is due: Movies,
 //! then Shows, then the Seasons and Episodes of matched Shows (so a Show
 //! matched in a pass has its Seasons and Episodes filled in by the same
 //! pass). `main` runs one every few seconds, tests call it explicitly.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,8 +36,10 @@ use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use tracing::{info, warn};
 
 mod admin;
+mod sweep;
 
 pub use admin::{AttachNew, Corrected, CorrectionFailed};
+pub use sweep::{RATING_MAX_AGE, RATING_SWEEP_BATCH, RATING_SWEEP_INTERVAL};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::catalogue::{
@@ -71,19 +78,21 @@ impl Seasons {
         show_tmdb_id: i64,
         number: i32,
     ) -> Result<Option<&SeasonDetails>, LookupError> {
-        let key = (show_tmdb_id, number);
-        if !self.0.contains_key(&key) {
-            let details = match tmdb.season(show_tmdb_id, number).await {
-                Ok(details) => details,
-                Err(TmdbError::Rejected(e)) => {
-                    warn!(show_tmdb_id, season = number, error = %e, "season refused");
-                    None
-                }
-                Err(e) => return Err(e.into()),
-            };
-            self.0.insert(key, details);
-        }
-        Ok(self.0[&key].as_ref())
+        let entry = match self.0.entry((show_tmdb_id, number)) {
+            Entry::Occupied(known) => known.into_mut(),
+            Entry::Vacant(new) => {
+                let details = match tmdb.season(show_tmdb_id, number).await {
+                    Ok(details) => details,
+                    Err(TmdbError::Rejected(e)) => {
+                        warn!(show_tmdb_id, season = number, error = %e, "season refused");
+                        None
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                new.insert(details)
+            }
+        };
+        Ok(entry.as_ref())
     }
 }
 

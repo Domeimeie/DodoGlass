@@ -26,6 +26,11 @@ pub struct Config {
     pub database: String,
     /// The name of the `final` bucket, the first part of manifest keys.
     pub final_bucket: String,
+    /// Ratings older than this are fetched again by the rating sweep.
+    pub rating_max_age: Duration,
+    /// How many entries one rating sweep fetches at most (a Season's
+    /// Episodes count as one).
+    pub rating_sweep_batch: usize,
 }
 
 impl Default for Config {
@@ -33,6 +38,8 @@ impl Default for Config {
         Config {
             database: "assets.db".into(),
             final_bucket: "final".into(),
+            rating_max_age: crate::matcher::RATING_MAX_AGE,
+            rating_sweep_batch: crate::matcher::RATING_SWEEP_BATCH,
         }
     }
 }
@@ -43,6 +50,8 @@ pub struct App {
     reconciler: Reconciler,
     matcher: Matcher,
     assets: Arc<dyn object_store::ObjectStore>,
+    rating_max_age: Duration,
+    rating_sweep_batch: usize,
 }
 
 impl App {
@@ -70,6 +79,8 @@ impl App {
             reconciler,
             matcher,
             assets: buckets.assets,
+            rating_max_age: config.rating_max_age,
+            rating_sweep_batch: config.rating_sweep_batch,
         };
         app.reconcile().await?;
         Ok(app)
@@ -99,6 +110,30 @@ impl App {
                 ticks.tick().await;
                 if let Err(e) = matcher.run_once().await {
                     error!(error = format!("{e:#}"), "metadata pass failed");
+                }
+            }
+        })
+    }
+
+    /// One rating sweep: up to a batch of the Ratings older than the maximum
+    /// age, oldest first.
+    pub async fn sweep_ratings(&self) -> Result<()> {
+        self.matcher
+            .sweep_ratings(self.rating_max_age, self.rating_sweep_batch)
+            .await
+    }
+
+    /// Runs a rating sweep now and then every `interval`.
+    pub fn spawn_periodic_rating_sweep(&self, interval: Duration) -> JoinHandle<()> {
+        let matcher = self.matcher.clone();
+        let (max_age, batch) = (self.rating_max_age, self.rating_sweep_batch);
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(interval);
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticks.tick().await;
+                if let Err(e) = matcher.sweep_ratings(max_age, batch).await {
+                    error!(error = format!("{e:#}"), "rating sweep failed");
                 }
             }
         })

@@ -11,7 +11,8 @@
 //!
 //! Nothing runs on a timer: reconcile happens when the test calls
 //! [`TestApp::reconcile`] (or at [`TestApp::restart`], like at a real startup),
-//! TMDB lookups (and their retries) when it calls [`TestApp::match_metadata`].
+//! TMDB lookups (and their retries) when it calls [`TestApp::match_metadata`],
+//! a rating sweep when it calls [`TestApp::sweep_ratings`].
 
 #![allow(dead_code)] // each test file uses a different part of the harness
 
@@ -50,7 +51,7 @@ pub struct TestApp {
     pub buckets: Buckets,
     pub clock: Arc<FakeClock>,
     pub tmdb: Arc<FakeTmdb>,
-    database: String,
+    config: Config,
     events: UploadEventSender,
     listener: JoinHandle<()>,
     status: StatusHintSender,
@@ -60,6 +61,12 @@ pub struct TestApp {
 impl TestApp {
     /// A fresh asset server with an empty catalogue and empty buckets.
     pub async fn start() -> Self {
+        Self::start_with(|_| {}).await
+    }
+
+    /// As [`start`](Self::start), with settings changed by `configure`
+    /// (e.g. `|config| config.rating_sweep_batch = 2`).
+    pub async fn start_with(configure: impl FnOnce(&mut Config)) -> Self {
         static NEXT_DB: AtomicU64 = AtomicU64::new(0);
         // A named in-memory database, so that a restart can open it again.
         let database = format!(
@@ -72,8 +79,13 @@ impl TestApp {
             final_: Arc::new(InMemory::new()),
             assets: Arc::new(InMemory::new()),
         };
-        Self::start_on(
+        let mut config = Config {
             database,
+            ..Config::default()
+        };
+        configure(&mut config);
+        Self::start_on(
+            config,
             buckets,
             Arc::new(FakeClock::default()),
             Arc::new(FakeTmdb::default()),
@@ -82,16 +94,12 @@ impl TestApp {
     }
 
     async fn start_on(
-        database: String,
+        config: Config,
         buckets: Buckets,
         clock: Arc<FakeClock>,
         tmdb: Arc<FakeTmdb>,
     ) -> Self {
-        let config = Config {
-            database: database.clone(),
-            ..Config::default()
-        };
-        let app = App::start(config, buckets.clone(), clock.clone(), tmdb.clone())
+        let app = App::start(config.clone(), buckets.clone(), clock.clone(), tmdb.clone())
             .await
             .expect("the asset server starts");
         let (events, source) = InMemoryUploadEvents::new();
@@ -106,7 +114,7 @@ impl TestApp {
             buckets,
             clock,
             tmdb,
-            database,
+            config,
             events,
             listener,
         }
@@ -121,7 +129,7 @@ impl TestApp {
             buckets,
             clock,
             tmdb,
-            database,
+            config,
             listener,
             status_listener,
             ..
@@ -131,7 +139,7 @@ impl TestApp {
         // Keep the in-memory database alive while the old app goes away.
         let keep = app.database();
         drop(app);
-        let restarted = Self::start_on(database, buckets, clock, tmdb).await;
+        let restarted = Self::start_on(config, buckets, clock, tmdb).await;
         drop(keep);
         restarted
     }
@@ -221,6 +229,12 @@ impl TestApp {
     /// One pass of TMDB lookups: new Movies, and retries that are due.
     pub async fn match_metadata(&self) {
         self.app.match_metadata().await.expect("metadata pass");
+    }
+
+    /// One rating sweep: up to a batch of the Ratings older than the maximum
+    /// age, oldest first (7 days and 20 by default; see [`start_with`](Self::start_with)).
+    pub async fn sweep_ratings(&self) {
+        self.app.sweep_ratings().await.expect("rating sweep");
     }
 
     pub fn advance(&self, by: Duration) {
