@@ -1,7 +1,8 @@
-//! Media file states. A Media file is Processing from its upload until the
-//! transcoder's output marker is found, then Ready (ADR 0001). It is Failed
-//! when its transcode did not complete, and Missing when the output of a
-//! Ready one has disappeared from `final`.
+//! Media file states. The catalogue only learns of a Media file once its
+//! transcode is complete, from its output marker in `final` (ADR 0001, ADR
+//! 0006), so a Media file is Ready from the start. It is Missing while its
+//! marker is gone from `final` (its output was deleted, or a re-upload is
+//! being transcoded), and Ready again once the marker is back.
 
 use anyhow::Result;
 use diesel::prelude::*;
@@ -11,25 +12,14 @@ use serde::Serialize;
 use super::Catalogue;
 use super::schema::media_file;
 
-pub(super) const PROCESSING: &str = "processing";
 pub(super) const READY: &str = "ready";
-pub(super) const FAILED: &str = "failed";
 pub(super) const MISSING: &str = "missing";
-
-/// How long a Media file may stay Processing, with its input still in
-/// `ingest`, before it counts as Failed.
-pub const PROCESSING_TIMEOUT_MS: i64 = 24 * 60 * 60 * 1000;
-
-/// The error of a Media file that hit [`PROCESSING_TIMEOUT_MS`].
-pub const TIMED_OUT: &str = "no output after 24 h while the input is still in ingest";
 
 /// A Media file's state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaFileState {
-    Processing,
     Ready,
-    Failed,
     Missing,
 }
 
@@ -37,9 +27,7 @@ impl MediaFileState {
     /// `ready` → Ready, as the API spells states.
     pub fn parse(s: &str) -> Result<Self> {
         Ok(match s {
-            PROCESSING => MediaFileState::Processing,
             READY => MediaFileState::Ready,
-            FAILED => MediaFileState::Failed,
             MISSING => MediaFileState::Missing,
             other => anyhow::bail!("unknown Media file state {other:?}"),
         })
@@ -47,11 +35,9 @@ impl MediaFileState {
 }
 
 impl MediaFileState {
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
-            MediaFileState::Processing => PROCESSING,
             MediaFileState::Ready => READY,
-            MediaFileState::Failed => FAILED,
             MediaFileState::Missing => MISSING,
         }
     }
@@ -64,7 +50,6 @@ struct StatusRow {
     source_key: String,
     label: String,
     state: String,
-    error: Option<String>,
 }
 
 impl StatusRow {
@@ -74,7 +59,6 @@ impl StatusRow {
             key: self.source_key,
             label: self.label,
             state: MediaFileState::parse(&self.state)?,
-            error: self.error,
         })
     }
 }
@@ -83,23 +67,19 @@ impl StatusRow {
 #[derive(Debug, Clone)]
 pub struct TrackedMediaFile {
     pub id: String,
-    /// The upload key in `ingest`.
-    pub source_key: String,
     pub state: MediaFileState,
-    /// True when it has been Processing for longer than
-    /// [`PROCESSING_TIMEOUT_MS`].
-    pub overdue: bool,
+    /// The manifests stored for it, to compare with its marker's formats.
+    pub manifests: Manifests,
 }
 
 /// The state of one Media file, for the admin API.
 #[derive(Debug, Clone, Serialize)]
 pub struct MediaFileStatus {
     pub id: String,
-    /// The upload key in `ingest`.
+    /// The upload key, as the output marker records it.
     pub key: String,
     pub label: String,
     pub state: MediaFileState,
-    pub error: Option<String>,
 }
 
 /// The manifest keys of a Ready Media file (`<final bucket>/<id>/...`), for
@@ -199,19 +179,6 @@ fn oldest(
         .optional()?)
 }
 
-/// Media file `id` can no longer play (Missing, Failed): if it is its
-/// owner's default, the oldest other Ready Media file takes over. With none,
-/// it stays the default.
-pub(super) fn hand_over_default(conn: &mut SqliteConnection, id: &str) -> Result<()> {
-    let Some((Some(owner), true)) = owner_of(conn, id)? else {
-        return Ok(());
-    };
-    if let Some(next) = oldest(conn, owner, id, true)? {
-        make_default(conn, owner, &next)?;
-    }
-    Ok(())
-}
-
 /// Media file `id` is about to be removed: if it is its owner's default, the
 /// oldest other Ready Media file takes over, or else the oldest other one.
 pub(super) fn hand_over_default_before_removal(
@@ -244,33 +211,26 @@ pub(super) fn other_labels(
         .load(conn)?)
 }
 
-/// Creates the Media file `id` as Processing, or makes an existing one
-/// Processing again (a new version of the same upload: its owner, Label and
-/// default flag stay).
+/// Creates the Media file `id` as Ready with `manifests`. If it exists
+/// already (a re-upload to the same path, or the same marker seen twice), it
+/// is made Ready with them instead: its owner, Label and default flag stay.
 ///
 /// A new Media file of `owner` is labelled `stem`, made unique within the
 /// owner (see [`unique_label`]); the first one of an owner is its Default
 /// media file. Run it inside the transaction that found the owner.
-pub(super) fn processing(
+pub(super) fn place_ready(
     conn: &mut SqliteConnection,
-    id: &str,
-    key: &str,
-    owner: Option<Owner>,
-    stem: &str,
+    placed: Placed<'_>,
+    manifests: Manifests,
     now: i64,
 ) -> Result<()> {
-    let updated = diesel::update(media_file::table.find(id))
-        .set((
-            // The latest spelling (NFC or NFD) is the one now in `ingest`.
-            media_file::source_key.eq(key),
-            media_file::state.eq(PROCESSING),
-            media_file::state_since_ms.eq(now),
-            media_file::hls_manifest.eq(None::<String>),
-            media_file::dash_manifest.eq(None::<String>),
-            media_file::error.eq(None::<String>),
-        ))
-        .execute(conn)?;
-    if updated > 0 {
+    let Placed {
+        id,
+        key,
+        owner,
+        stem,
+    } = placed;
+    if set_ready(conn, id, Some(key), &manifests, now)? {
         return Ok(());
     }
     let (label, is_default) = match owner {
@@ -293,12 +253,59 @@ pub(super) fn processing(
             media_file::episode_id.eq(episode),
             media_file::label.eq(label),
             media_file::is_default.eq(is_default),
-            media_file::state.eq(PROCESSING),
+            media_file::state.eq(READY),
             media_file::state_since_ms.eq(now),
             media_file::created_ms.eq(now),
+            media_file::hls_manifest.eq(manifests.hls),
+            media_file::dash_manifest.eq(manifests.dash),
         ))
         .execute(conn)?;
     Ok(())
+}
+
+/// Where a marker's input key places its Media file.
+pub(super) struct Placed<'a> {
+    pub id: &'a str,
+    /// The input key, byte for byte as uploaded.
+    pub key: &'a str,
+    pub owner: Option<Owner>,
+    /// The file name's stem, the Label it starts from.
+    pub stem: &'a str,
+}
+
+/// Makes Media file `id` Ready with `manifests` (and, given one, the input
+/// key's latest spelling). Its state's time only changes if it was not Ready.
+/// `false` if there is no such Media file.
+fn set_ready(
+    conn: &mut SqliteConnection,
+    id: &str,
+    key: Option<&str>,
+    manifests: &Manifests,
+    now: i64,
+) -> Result<bool> {
+    let found = diesel::update(media_file::table.find(id))
+        .set((
+            media_file::hls_manifest.eq(&manifests.hls),
+            media_file::dash_manifest.eq(&manifests.dash),
+        ))
+        .execute(conn)?;
+    if found == 0 {
+        return Ok(false);
+    }
+    if let Some(key) = key {
+        // NFC and NFD spellings of a key have one id: the latest one counts.
+        diesel::update(media_file::table.find(id))
+            .set(media_file::source_key.eq(key))
+            .execute(conn)?;
+    }
+    diesel::update(media_file::table.find(id))
+        .filter(media_file::state.ne(READY))
+        .set((
+            media_file::state.eq(READY),
+            media_file::state_since_ms.eq(now),
+        ))
+        .execute(conn)?;
+    Ok(true)
 }
 
 /// The Unassigned media file `id` now belongs to `owner`. Its Label (the file
@@ -380,30 +387,26 @@ impl Catalogue {
     }
 
     async fn tracked(&self, only: Option<String>) -> Result<Vec<TrackedMediaFile>> {
-        let now = self.clock.now_ms();
         self.db
             .run(move |conn| {
                 let mut query = media_file::table.into_boxed();
                 if let Some(id) = only {
                     query = query.filter(media_file::id.eq(id));
                 }
-                let rows: Vec<(String, String, String, i64)> = query
+                let rows: Vec<(String, String, Option<String>, Option<String>)> = query
                     .select((
                         media_file::id,
-                        media_file::source_key,
                         media_file::state,
-                        media_file::state_since_ms,
+                        media_file::hls_manifest,
+                        media_file::dash_manifest,
                     ))
                     .load(conn)?;
                 rows.into_iter()
-                    .map(|(id, source_key, state, since)| {
-                        let state = MediaFileState::parse(&state)?;
+                    .map(|(id, state, hls, dash)| {
                         Ok(TrackedMediaFile {
                             id,
-                            source_key,
-                            state,
-                            overdue: state == MediaFileState::Processing
-                                && now - since > PROCESSING_TIMEOUT_MS,
+                            state: MediaFileState::parse(&state)?,
+                            manifests: Manifests { hls, dash },
                         })
                     })
                     .collect()
@@ -444,75 +447,36 @@ impl Catalogue {
             .await
     }
 
-    /// Media file `id`'s transcode did not complete: a Processing one is now
-    /// Failed with `error`. Any other state stays, so that a late hint about
-    /// an earlier version does not undo a Ready one.
-    pub async fn transcode_failed(&self, id: &str, error: &str) -> Result<()> {
-        self.set_state(id, &[PROCESSING], FAILED, Some(error.to_string()))
-            .await
-    }
-
     /// The output of Ready Media file `id` is gone from `final`: it is
     /// Missing until it comes back. It is never deleted automatically.
+    /// Its Label stays, and so does the Default media file: while it is
+    /// Missing the read API shows another Ready one as default (ADR 0006).
     pub async fn output_lost(&self, id: &str) -> Result<()> {
-        self.set_state(id, &[READY], MISSING, None).await
-    }
-
-    /// An output marker in `final` for a key the catalogue never saw an
-    /// upload for: the Media file is placed from that key, and Ready.
-    pub async fn output_seen(&self, key: &str, manifests: Manifests) -> Result<()> {
-        self.upload_seen(key).await?;
-        self.output_found(&dodoglass_ids::task_id_from_key(key), manifests)
-            .await
-    }
-
-    async fn set_state(
-        &self,
-        id: &str,
-        from: &'static [&'static str],
-        to: &'static str,
-        error: Option<String>,
-    ) -> Result<()> {
-        let id = id.to_string();
-        let now = self.clock.now_ms();
-        self.db
-            .run(move |conn| {
-                conn.transaction(|conn| {
-                    let changed = diesel::update(media_file::table.find(&id))
-                        .filter(media_file::state.eq_any(from))
-                        .set((
-                            media_file::state.eq(to),
-                            media_file::state_since_ms.eq(now),
-                            media_file::error.eq(error),
-                        ))
-                        .execute(conn)?;
-                    if changed > 0 && to != READY {
-                        hand_over_default(conn, &id)?;
-                    }
-                    Ok(())
-                })
-            })
-            .await
-    }
-
-    /// The output marker of Media file `id` was found: it is Ready, with
-    /// these manifests. A Failed or Missing one becomes Ready too: the marker
-    /// is the source of truth (ADR 0001).
-    pub async fn output_found(&self, id: &str, manifests: Manifests) -> Result<()> {
         let id = id.to_string();
         let now = self.clock.now_ms();
         self.db
             .run(move |conn| {
                 diesel::update(media_file::table.find(&id))
-                    .filter(media_file::state.ne(READY))
+                    .filter(media_file::state.eq(READY))
                     .set((
-                        media_file::state.eq(READY),
+                        media_file::state.eq(MISSING),
                         media_file::state_since_ms.eq(now),
-                        media_file::hls_manifest.eq(manifests.hls),
-                        media_file::dash_manifest.eq(manifests.dash),
-                        media_file::error.eq(None::<String>),
                     ))
                     .execute(conn)?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// The output marker of known Media file `id` was found: it is Ready
+    /// (again), with these manifests. The marker is the source of truth
+    /// (ADR 0001).
+    pub async fn output_found(&self, id: &str, manifests: Manifests) -> Result<()> {
+        let id = id.to_string();
+        let now = self.clock.now_ms();
+        self.db
+            .run(move |conn| {
+                set_ready(conn, &id, None, &manifests, now)?;
                 Ok(())
             })
             .await

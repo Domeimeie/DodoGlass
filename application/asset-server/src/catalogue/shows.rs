@@ -10,8 +10,8 @@ use diesel::prelude::*;
 use serde::Serialize;
 
 use super::Catalogue;
-use super::media_files::{Manifests, READY};
-use super::movies::MediaFileView;
+use super::media_files::READY;
+use super::movies::{MediaFileView, ReadyMediaFileRow, show_default};
 use super::schema::{episode, media_file, season, show};
 use super::show_metadata::{self, ShowMetadataView};
 
@@ -200,16 +200,6 @@ pub(super) fn episode_id(
         .optional()?)
 }
 
-#[derive(Queryable, Selectable)]
-#[diesel(table_name = media_file)]
-struct ReadyMediaFileRow {
-    id: String,
-    label: String,
-    is_default: bool,
-    hls_manifest: Option<String>,
-    dash_manifest: Option<String>,
-}
-
 impl Catalogue {
     /// The Shows that are not Hidden, by name.
     pub async fn visible_shows(&self) -> Result<Vec<ShowView>> {
@@ -324,15 +314,10 @@ impl Catalogue {
                         ));
                     }
                     let (_, episode) = episodes.last_mut().expect("just pushed");
-                    episode.media_files.push(MediaFileView {
-                        id: file.id,
-                        label: file.label,
-                        default: file.is_default,
-                        manifests: Manifests {
-                            hls: file.hls_manifest,
-                            dash: file.dash_manifest,
-                        },
-                    });
+                    episode.media_files.push(file.into());
+                }
+                for (_, episode) in &mut episodes {
+                    show_default(&mut episode.media_files);
                 }
                 Ok(Some(episodes.into_iter().map(|(_, e)| e).collect()))
             })

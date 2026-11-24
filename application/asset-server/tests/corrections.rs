@@ -15,9 +15,7 @@ const MATRIX: &str = "movies/The Matrix (1999)/matrix.mkv";
 
 /// Uploads `key`, lets its transcode finish and runs a TMDB pass.
 async fn ready(app: &TestApp, key: &str) {
-    app.upload(key).await;
     app.finish_transcode(key).await;
-    app.reconcile().await;
     app.match_metadata().await;
 }
 
@@ -190,9 +188,7 @@ async fn a_refresh_pulls_in_tmdb_changes_except_locked_fields_until_unlocked() {
 async fn a_movie_edited_before_its_first_lookup_is_still_looked_up() {
     let app = TestApp::start().await;
     app.tmdb.add_movie(movie(603, "The Matrix", 1999));
-    app.upload(MATRIX).await;
     app.finish_transcode(MATRIX).await;
-    app.reconcile().await;
     let id = only_movie(&app).await["id"].clone();
     app.send_json(
         "PATCH",

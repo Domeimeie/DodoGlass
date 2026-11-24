@@ -1,6 +1,6 @@
 //! Admin management of Media files: setting the Default media file, renaming
-//! Labels, removing Media files, deleting Hidden entries, and listing Failed
-//! and Missing Media files.
+//! Labels, removing Media files, deleting Hidden entries, and listing Missing
+//! Media files.
 
 mod common;
 
@@ -20,6 +20,13 @@ const PILOT_HD: &str = "shows/Breaking Bad (2008)/Season 01/S01E01 hd.mkv";
 
 const MINUTE: Duration = Duration::from_secs(60);
 
+/// The output of `key` disappears from `final` and a reconcile notices: it
+/// is Missing.
+async fn make_missing(app: &TestApp, key: &str) {
+    lose_output(app, key).await;
+    app.reconcile().await;
+}
+
 /// The output of `key` disappears from `final`.
 async fn lose_output(app: &TestApp, key: &str) {
     app.delete_prefix(&app.buckets.final_, &format!("{}/", id(key)))
@@ -35,9 +42,7 @@ fn uri(key: &str) -> String {
 }
 
 async fn upload_ready(app: &TestApp, key: &str) {
-    app.upload(key).await;
     app.finish_transcode(key).await;
-    app.reconcile().await;
 }
 
 /// The Label of the default Media file of the first listed Movie, if any.
@@ -92,7 +97,8 @@ async fn setting_the_default_changes_which_media_file_the_read_api_marks_as_defa
 async fn a_media_file_that_is_not_ready_cannot_be_made_the_default() {
     let app = TestApp::start().await;
     upload_ready(&app, MATRIX).await;
-    app.upload(DIRECTORS_CUT).await;
+    upload_ready(&app, DIRECTORS_CUT).await;
+    make_missing(&app, DIRECTORS_CUT).await;
 
     let status = put(&app, &format!("{}/default", uri(DIRECTORS_CUT))).await;
 
@@ -110,7 +116,7 @@ async fn an_unknown_media_file_cannot_be_made_the_default() {
 }
 
 #[tokio::test]
-async fn when_the_default_goes_missing_the_oldest_remaining_ready_one_takes_over() {
+async fn while_the_default_is_missing_the_oldest_ready_one_is_shown_as_default() {
     let app = TestApp::start().await;
     upload_ready(&app, MATRIX).await;
     app.advance(MINUTE);
@@ -119,23 +125,30 @@ async fn when_the_default_goes_missing_the_oldest_remaining_ready_one_takes_over
     upload_ready(&app, EXTENDED).await;
     put(&app, &format!("{}/default", uri(EXTENDED))).await;
 
-    lose_output(&app, EXTENDED).await;
-    app.reconcile().await;
-
+    make_missing(&app, EXTENDED).await;
     assert_eq!(movie_default(&app).await.as_deref(), Some("matrix"));
+
+    // Not stored: once it is Ready again, it is the default again.
+    upload_ready(&app, EXTENDED).await;
+    assert_eq!(
+        movie_default(&app).await.as_deref(),
+        Some("matrix-extended")
+    );
 }
 
 #[tokio::test]
-async fn when_the_default_fails_the_oldest_remaining_ready_one_takes_over() {
+async fn removing_a_missing_default_hands_the_default_over_for_good() {
     let app = TestApp::start().await;
     upload_ready(&app, MATRIX).await;
     app.advance(MINUTE);
     upload_ready(&app, DIRECTORS_CUT).await;
+    app.start_retranscode(MATRIX).await;
+    app.reconcile().await;
 
-    // A new version of the default, whose transcode fails.
-    lose_output(&app, MATRIX).await;
-    app.upload(MATRIX).await;
-    app.fail_transcode(MATRIX, "ffmpeg exited with 1").await;
+    assert_eq!(delete(&app, &uri(MATRIX)).await, 204);
+    // The re-upload finishes after all: a new Media file, not the default.
+    app.advance(MINUTE);
+    upload_ready(&app, MATRIX).await;
 
     assert_eq!(
         movie_default(&app).await.as_deref(),
@@ -147,18 +160,17 @@ async fn when_the_default_fails_the_oldest_remaining_ready_one_takes_over() {
 async fn a_missing_default_with_no_other_ready_media_file_stays_the_default() {
     let app = TestApp::start().await;
     upload_ready(&app, MATRIX).await;
-    app.upload(DIRECTORS_CUT).await;
+    upload_ready(&app, DIRECTORS_CUT).await;
+    make_missing(&app, DIRECTORS_CUT).await;
 
-    lose_output(&app, MATRIX).await;
-    app.reconcile().await;
-    app.finish_transcode(MATRIX).await;
-    app.reconcile().await;
+    make_missing(&app, MATRIX).await;
+    upload_ready(&app, MATRIX).await;
 
     assert_eq!(movie_default(&app).await.as_deref(), Some("matrix"));
 }
 
 #[tokio::test]
-async fn the_default_of_an_episode_hands_over_too() {
+async fn while_the_default_of_an_episode_is_missing_another_is_shown_as_default() {
     let app = TestApp::start().await;
     upload_ready(&app, PILOT).await;
     app.advance(MINUTE);
@@ -310,7 +322,8 @@ async fn removing_the_default_skips_media_files_that_are_not_ready() {
     let app = TestApp::start().await;
     upload_ready(&app, MATRIX).await;
     app.advance(MINUTE);
-    app.upload(DIRECTORS_CUT).await;
+    upload_ready(&app, DIRECTORS_CUT).await;
+    make_missing(&app, DIRECTORS_CUT).await;
     app.advance(MINUTE);
     upload_ready(&app, EXTENDED).await;
 
@@ -326,11 +339,11 @@ async fn removing_the_default_skips_media_files_that_are_not_ready() {
 async fn removing_the_default_with_nothing_else_ready_leaves_the_default_to_the_next_one() {
     let app = TestApp::start().await;
     upload_ready(&app, MATRIX).await;
-    app.upload(DIRECTORS_CUT).await;
+    upload_ready(&app, DIRECTORS_CUT).await;
+    make_missing(&app, DIRECTORS_CUT).await;
 
     delete(&app, &uri(MATRIX)).await;
-    app.finish_transcode(DIRECTORS_CUT).await;
-    app.reconcile().await;
+    upload_ready(&app, DIRECTORS_CUT).await;
 
     assert_eq!(
         movie_default(&app).await.as_deref(),
@@ -429,8 +442,8 @@ async fn show_id(app: &TestApp) -> Value {
 async fn deleting_a_hidden_episode_of_a_visible_season() {
     let app = TestApp::start().await;
     upload_ready(&app, PILOT).await;
-    app.upload(PILOT_2).await;
-    app.fail_transcode(PILOT_2, "ffmpeg exited with 1").await;
+    upload_ready(&app, PILOT_2).await;
+    make_missing(&app, PILOT_2).await;
     let show = show_id(&app).await;
     let episode = |n: u32| format!("/admin/shows/{show}/seasons/1/episodes/{n}");
 
@@ -445,7 +458,8 @@ async fn deleting_a_hidden_episode_of_a_visible_season() {
 async fn deleting_a_hidden_season_of_a_visible_show() {
     let app = TestApp::start().await;
     upload_ready(&app, PILOT).await;
-    app.upload(SEASON_2).await;
+    upload_ready(&app, SEASON_2).await;
+    make_missing(&app, SEASON_2).await;
     let show = show_id(&app).await;
 
     assert_eq!(
@@ -467,7 +481,8 @@ async fn deleting_a_hidden_season_of_a_visible_show() {
 async fn deleting_a_hidden_show_removes_its_seasons_episodes_and_media_files() {
     let app = TestApp::start().await;
     upload_ready(&app, PILOT).await;
-    app.upload(SEASON_2).await;
+    upload_ready(&app, SEASON_2).await;
+    make_missing(&app, SEASON_2).await;
     let show = show_id(&app).await;
     assert_eq!(delete(&app, &format!("/admin/shows/{show}")).await, 409);
 
@@ -479,48 +494,35 @@ async fn deleting_a_hidden_show_removes_its_seasons_episodes_and_media_files() {
     assert_eq!(delete(&app, &format!("/admin/shows/{show}")).await, 404);
 }
 
-// --- Failed and Missing -------------------------------------------------------
+// --- Missing ----------------------------------------------------------------
 
 #[tokio::test]
-async fn the_admin_api_lists_failed_media_files_with_their_error_and_missing_ones_with_their_key() {
+async fn the_admin_api_lists_missing_media_files_with_their_key() {
     let app = TestApp::start().await;
     upload_ready(&app, MATRIX).await;
     upload_ready(&app, PILOT).await;
-    app.upload(DIRECTORS_CUT).await;
-    app.fail_transcode(DIRECTORS_CUT, "ffprobe: invalid data")
-        .await;
-    lose_output(&app, PILOT).await;
-    app.reconcile().await;
+    make_missing(&app, PILOT).await;
 
-    assert_eq!(
-        app.get_json("/admin/media-files?state=failed").await,
-        json!([{
-            "id": id(DIRECTORS_CUT),
-            "key": DIRECTORS_CUT,
-            "label": "matrix-directors-cut",
-            "state": "failed",
-            "error": "ffprobe: invalid data",
-        }])
-    );
+    let missing = json!([{
+        "id": id(PILOT),
+        "key": PILOT,
+        "label": "S01E01",
+        "state": "missing",
+    }]);
     assert_eq!(
         app.get_json("/admin/media-files?state=missing").await,
-        json!([{
-            "id": id(PILOT),
-            "key": PILOT,
-            "label": "S01E01",
-            "state": "missing",
-            "error": null,
-        }])
+        missing
     );
-    let both = app
-        .get_json("/admin/media-files?state=failed,missing")
-        .await;
-    assert_eq!(both.as_array().unwrap().len(), 2);
+    let all = app.get_json("/admin/media-files").await;
+    assert_eq!(all.as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]
-async fn an_unknown_state_is_a_bad_request() {
+async fn only_missing_is_a_state_to_filter_by() {
     let app = TestApp::start().await;
 
-    assert_eq!(app.get("/admin/media-files?state=gone").await.0, 400);
+    for state in ["gone", "failed", "processing", "ready", "failed,missing"] {
+        let uri = format!("/admin/media-files?state={state}");
+        assert_eq!(app.get(&uri).await.0, 400, "{state}");
+    }
 }

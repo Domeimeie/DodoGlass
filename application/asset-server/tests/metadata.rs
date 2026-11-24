@@ -15,9 +15,7 @@ const MATRIX: &str = "movies/The Matrix (1999)/matrix.mkv";
 
 /// A Movie upload that is Ready (so listed), with its TMDB lookup done.
 async fn ready_movie(app: &TestApp, key: &str) {
-    app.upload(key).await;
     app.finish_transcode(key).await;
-    app.reconcile().await;
     app.match_metadata().await;
 }
 

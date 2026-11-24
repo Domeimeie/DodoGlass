@@ -2,9 +2,9 @@
 //! HTTP API. See "Writing a scenario test" in the README.
 //!
 //! The ports are replaced by in-memory versions:
-//! - upload events come from [`InMemoryUploadEvents`], fed by [`TestApp::upload`];
-//! - status hints come from [`InMemoryStatusHints`], fed by [`TestApp::send_status`];
-//! - the `ingest`, `final` and `assets` buckets are `object_store` in memory;
+//! - marker events (RustFS's events for new output markers in `final`) come
+//!   from [`InMemoryMarkerEvents`], fed by [`TestApp::finish_transcode`];
+//! - the `final` and `assets` buckets are `object_store` in memory;
 //! - the clock is a [`FakeClock`] the test moves forward;
 //! - TMDB is a [`FakeTmdb`] (`tmdb.rs`), empty until the test adds Movies;
 //! - SQLite runs in memory, with the real migrations.
@@ -23,9 +23,8 @@ use std::time::Duration;
 
 use asset_server::app::{App, Config};
 use asset_server::ports::clock::FakeClock;
-use asset_server::ports::status_hints::{InMemoryStatusHints, StatusHintSender};
+use asset_server::ports::marker_events::{InMemoryMarkerEvents, MarkerEventSender};
 use asset_server::ports::storage::Buckets;
-use asset_server::ports::upload_events::{InMemoryUploadEvents, UploadEventSender};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -41,7 +40,7 @@ use tower::ServiceExt;
 
 use tmdb::FakeTmdb;
 
-/// A real event RustFS published for an upload of `sample.mp4` to `ingest`.
+/// A real event RustFS published (for an upload of `sample.mp4` to `ingest`).
 const RUSTFS_EVENT: &str = include_str!("../../../transcoder/tests/fixtures/rustfs-event.json");
 
 pub struct TestApp {
@@ -51,10 +50,8 @@ pub struct TestApp {
     pub clock: Arc<FakeClock>,
     pub tmdb: Arc<FakeTmdb>,
     database: String,
-    events: UploadEventSender,
-    listener: JoinHandle<()>,
-    status: StatusHintSender,
-    status_listener: JoinHandle<()>,
+    markers: MarkerEventSender,
+    marker_listener: JoinHandle<()>,
 }
 
 impl TestApp {
@@ -68,7 +65,6 @@ impl TestApp {
             NEXT_DB.fetch_add(1, Ordering::Relaxed)
         );
         let buckets = Buckets {
-            ingest: Arc::new(InMemory::new()),
             final_: Arc::new(InMemory::new()),
             assets: Arc::new(InMemory::new()),
         };
@@ -94,21 +90,17 @@ impl TestApp {
         let app = App::start(config, buckets.clone(), clock.clone(), tmdb.clone())
             .await
             .expect("the asset server starts");
-        let (events, source) = InMemoryUploadEvents::new();
-        let listener = app.spawn_ingest_listener(source);
-        let (status, hints) = InMemoryStatusHints::new();
-        let status_listener = app.spawn_status_listener(hints);
+        let (markers, source) = InMemoryMarkerEvents::new();
+        let marker_listener = app.spawn_marker_listener(source);
         TestApp {
-            status,
-            status_listener,
+            markers,
+            marker_listener,
             router: app.router(),
             app,
             buckets,
             clock,
             tmdb,
             database,
-            events,
-            listener,
         }
     }
 
@@ -122,12 +114,10 @@ impl TestApp {
             clock,
             tmdb,
             database,
-            listener,
-            status_listener,
+            marker_listener,
             ..
         } = self;
-        listener.abort();
-        status_listener.abort();
+        marker_listener.abort();
         // Keep the in-memory database alive while the old app goes away.
         let keep = app.database();
         drop(app);
@@ -138,21 +128,27 @@ impl TestApp {
 
     // --- inputs -----------------------------------------------------------
 
-    /// An upload of `key` to `ingest`: RustFS's event for it goes through the
-    /// ingest listener. Returns once the listener has handled it.
-    pub async fn upload(&self, key: &str) {
-        self.send_event(s3_event(&[key])).await;
-    }
-
-    /// Any message on the ingest topic; returns once the listener has handled
-    /// (acknowledged) it.
-    pub async fn send_event(&self, payload: Vec<u8>) {
-        self.events.send(payload).await;
-    }
-
     /// The transcoder finishes `key`: its output and output marker
-    /// (`<id>/source.json`) appear in `final`, as the transcoder writes them.
+    /// (`<id>/source.json`) appear in `final`, and RustFS's event for the
+    /// marker goes through the marker listener. Returns once the listener has
+    /// handled (acknowledged) it.
     pub async fn finish_transcode(&self, key: &str) {
+        self.finish_transcode_without_event(key).await;
+        let id = dodoglass_ids::task_id_from_key(key);
+        self.send_marker_event(final_event(&[&format!("{id}/source.json")]))
+            .await;
+    }
+
+    /// Any message on `dodoglass/final`; returns once the marker listener has
+    /// handled (acknowledged) it.
+    pub async fn send_marker_event(&self, payload: Vec<u8>) {
+        self.markers.send(payload).await;
+    }
+
+    /// As [`finish_transcode`](Self::finish_transcode), but the event is lost
+    /// (the asset server was down, the broker dropped it): only a reconcile
+    /// finds the output.
+    pub async fn finish_transcode_without_event(&self, key: &str) {
         let id = dodoglass_ids::task_id_from_key(key);
         for file in ["hls/master.m3u8", "dash/manifest.mpd"] {
             self.put(&self.buckets.final_, &format!("{id}/{file}"), b"manifest")
@@ -173,25 +169,25 @@ impl TestApp {
         .await;
     }
 
-    /// A status message on `dodoglass/status`, as the transcoder publishes
-    /// it; returns once the status listener has handled it.
-    pub async fn send_status(&self, message: Value) {
-        self.status
-            .send(serde_json::to_vec(&message).unwrap())
-            .await;
+    /// `key` is uploaded again and the transcoder starts on the new version:
+    /// it deletes the old output marker first (no event for that), so the
+    /// output is incomplete until [`finish_transcode`](Self::finish_transcode).
+    pub async fn start_retranscode(&self, key: &str) {
+        let id = dodoglass_ids::task_id_from_key(key);
+        self.buckets
+            .final_
+            .delete(&Path::parse(format!("{id}/source.json")).unwrap())
+            .await
+            .unwrap();
     }
 
-    /// The transcoder publishes `completed` for `key` (its output should be
-    /// in `final` already: see [`finish_transcode`](Self::finish_transcode)).
-    pub async fn send_completed(&self, key: &str) {
-        self.send_status(status_message(key, "completed", None))
+    /// The output of `key` disappears from `final` and a reconcile notices:
+    /// its Media file is Missing (no Ready one left: its entry is Hidden).
+    pub async fn lose_output(&self, key: &str) {
+        let id = dodoglass_ids::task_id_from_key(key);
+        self.delete_prefix(&self.buckets.final_, &format!("{id}/"))
             .await;
-    }
-
-    /// The transcoder gives up on `key` and publishes `failed` with `error`.
-    pub async fn fail_transcode(&self, key: &str, error: &str) {
-        self.send_status(status_message(key, "failed", Some(error)))
-            .await;
+        self.reconcile().await;
     }
 
     /// Deletes everything under `prefix` (e.g. `<id>/`) in `bucket`.
@@ -280,30 +276,15 @@ impl TestApp {
     }
 }
 
-/// A status message of the transcoder for the task of `key`.
-pub fn status_message(key: &str, event: &str, error: Option<&str>) -> Value {
-    let mut message = json!({
-        "time_ms": 1_793_128_170_038u64,
-        "worker": "test-worker",
-        "task": dodoglass_ids::task_id_from_key(key),
-        "event": event,
-    });
-    if let Some(error) = error {
-        message["error"] = json!(error);
-    }
-    message
-}
-
-/// The fixture exactly as RustFS sent it (an upload of `sample.mp4`).
-pub fn rustfs_event() -> Vec<u8> {
-    RUSTFS_EVENT.as_bytes().to_vec()
-}
-
-/// RustFS's event for uploads of `keys` to `ingest`, one record per key, with
-/// the keys form-encoded the way S3 events carry them.
-pub fn s3_event(keys: &[&str]) -> Vec<u8> {
+/// RustFS's event for new objects `keys` in `final` (e.g. `<id>/source.json`),
+/// one record per key, with the keys form-encoded the way S3 events carry
+/// them. Built from a real event RustFS published (for an upload to `ingest`).
+pub fn final_event(keys: &[&str]) -> Vec<u8> {
     let mut event: Value = serde_json::from_str(RUSTFS_EVENT).unwrap();
-    let record = event["Records"][0].clone();
+    let mut record = event["Records"][0].clone();
+    record["bucket_name"] = json!("final");
+    record["data"]["s3"]["bucket"]["name"] = json!("final");
+    record["data"]["s3"]["bucket"]["arn"] = json!("arn:aws:s3:::final");
     event["Records"] = keys
         .iter()
         .map(|key| {

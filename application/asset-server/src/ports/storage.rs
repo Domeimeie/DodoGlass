@@ -11,8 +11,6 @@ use object_store::aws::AmazonS3Builder;
 /// One store per bucket.
 #[derive(Clone)]
 pub struct Buckets {
-    /// Uploads (`movies/...`, `shows/...`).
-    pub ingest: Arc<dyn ObjectStore>,
     /// The transcoder's outputs: `<task id>/...` with `<task id>/source.json`.
     pub final_: Arc<dyn ObjectStore>,
     /// Images the asset server stores.
@@ -27,7 +25,7 @@ pub struct S3Settings {
 }
 
 impl Buckets {
-    pub fn s3(s3: &S3Settings, ingest: &str, final_: &str, assets: &str) -> Result<Buckets> {
+    pub fn s3(s3: &S3Settings, final_: &str, assets: &str) -> Result<Buckets> {
         let bucket = |name: &str| -> Result<Arc<dyn ObjectStore>> {
             let store = AmazonS3Builder::new()
                 .with_endpoint(&s3.endpoint)
@@ -43,7 +41,6 @@ impl Buckets {
             Ok(Arc::new(store))
         };
         Ok(Buckets {
-            ingest: bucket(ingest)?,
             final_: bucket(final_)?,
             assets: bucket(assets)?,
         })
@@ -52,11 +49,7 @@ impl Buckets {
     /// Lists each bucket once, so that a wrong endpoint, credentials or bucket
     /// name fail at startup.
     pub async fn check(&self) -> Result<()> {
-        for (name, store) in [
-            ("ingest", &self.ingest),
-            ("final", &self.final_),
-            ("assets", &self.assets),
-        ] {
+        for (name, store) in [("final", &self.final_), ("assets", &self.assets)] {
             store
                 .list_with_delimiter(None)
                 .await

@@ -16,9 +16,7 @@ const S01E02: &str = "shows/Breaking Bad (2008)/Season 01/S01E02.mkv";
 
 /// Uploads `key`, lets its transcode finish and runs a TMDB pass.
 async fn ready(app: &TestApp, key: &str) {
-    app.upload(key).await;
     app.finish_transcode(key).await;
-    app.reconcile().await;
     app.match_metadata().await;
 }
 

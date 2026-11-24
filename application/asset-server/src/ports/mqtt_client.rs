@@ -1,6 +1,6 @@
-//! What the two MQTT (version 5) connections share, upload events
-//! ([`super::mqtt`]) and status hints ([`super::mqtt_status`]): connecting,
-//! subscribing again after every reconnect, and handing each message on.
+//! The MQTT (version 5) connection under the marker events
+//! ([`super::mqtt_markers`]): connecting, subscribing again after every
+//! reconnect, and handing each message on.
 
 use std::time::Duration;
 

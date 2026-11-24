@@ -1,4 +1,5 @@
-//! Placing an upload: its path says which Movie or Episode it belongs to and gives it
+//! Placing a finished upload, from the input key its output marker records:
+//! its path says which Movie or Episode it belongs to and gives it
 //! its Label (ADR 0003); its key gives the Media file id (ADR 0004).
 
 use anyhow::Result;
@@ -6,14 +7,15 @@ use diesel::Connection;
 use dodoglass_ids::{Placement, place_upload, task_id_from_key};
 use unicode_normalization::UnicodeNormalization;
 
-use super::media_files::Owner;
+use super::media_files::{Manifests, Owner, Placed};
 use super::{Catalogue, media_files, movies, shows};
 
 impl Catalogue {
-    /// An upload to `ingest` was seen: the Media file for `key` is now
-    /// Processing, in the Movie or Episode its path names. Seeing the same key again is
-    /// a new version of the same Media file.
-    pub async fn upload_seen(&self, key: &str) -> Result<()> {
+    /// An output marker in `final` for a Media file the catalogue does not
+    /// know: the Media file for input `key` is placed in the Movie or Episode
+    /// its path names (an Unassigned media file if the path doesn't fit), and
+    /// is Ready with `manifests`. Placing the same key again is idempotent.
+    pub async fn output_seen(&self, key: &str, manifests: Manifests) -> Result<()> {
         // The raw key is what `ingest` holds (S3 keys are byte-exact), so it is
         // stored for every bucket call and shown as is. Only placing reads its
         // NFC form, so that a name typed on a Mac and on Linux is the same Movie
@@ -48,7 +50,13 @@ impl Catalogue {
                         }
                         Placement::Unassigned(_) => (None, file_stem(&nfc).to_string()),
                     };
-                    media_files::processing(conn, &id, &key, owner, &stem, now)
+                    let placed = Placed {
+                        id: &id,
+                        key: &key,
+                        owner,
+                        stem: &stem,
+                    };
+                    media_files::place_ready(conn, placed, manifests, now)
                 })
             })
             .await

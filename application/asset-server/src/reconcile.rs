@@ -1,15 +1,12 @@
 //! The reconciler: the transcoder's output marker (`<id>/source.json` in
-//! `final`) decides when a Media file is Ready (ADR 0001). It runs at
-//! startup, periodically, and early when a status hint arrives, so a
-//! finished transcode is found even when the asset server was down or missed
-//! the status message.
+//! `final`) decides when a Media file is Ready (ADR 0001). The marker
+//! listener checks one Media file as soon as RustFS announces its marker
+//! (ADR 0006); a full pass runs at startup and periodically, the safety net
+//! for events missed while the asset server was down or lost on the way.
 //!
 //! One pass checks every Media file against its marker:
-//! - marker there: Ready (also from Failed or Missing);
+//! - marker there: Ready (also from Missing), with the formats it lists;
 //! - marker gone from a Ready one: Missing;
-//! - Processing for more than 24 h with its input still in `ingest`: Failed
-//!   (the transcoder deletes the input once done, so a gone input means the
-//!   transcode got further and the marker is still to come);
 //!
 //! and places Media files from markers whose folder it does not know.
 
@@ -21,12 +18,11 @@ use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
 use tracing::{info, warn};
 
-use crate::catalogue::{Catalogue, Manifests, MediaFileState, TIMED_OUT, TrackedMediaFile};
+use crate::catalogue::{Catalogue, Manifests, MediaFileState, TrackedMediaFile};
 
 #[derive(Clone)]
 pub struct Reconciler {
     catalogue: Catalogue,
-    ingest: Arc<dyn ObjectStore>,
     final_: Arc<dyn ObjectStore>,
     /// The `final` bucket's name, the first part of the manifest keys.
     final_bucket: String,
@@ -37,19 +33,27 @@ pub struct Reconciler {
 /// for folders it does not know.
 type OutputMarker = dodoglass_ids::OutputMarker<String>;
 
+/// What became of a marker the marker listener was told about.
+#[derive(Debug)]
+pub enum MarkerOutcome {
+    /// The catalogue agrees with the marker (also when it already did).
+    Stored,
+    /// The marker is not a valid `source.json`: reading it again will not help.
+    Unreadable(String),
+}
+
 impl Reconciler {
-    pub fn new(
-        catalogue: Catalogue,
-        ingest: Arc<dyn ObjectStore>,
-        final_: Arc<dyn ObjectStore>,
-        final_bucket: &str,
-    ) -> Self {
+    pub fn new(catalogue: Catalogue, final_: Arc<dyn ObjectStore>, final_bucket: &str) -> Self {
         Reconciler {
             catalogue,
-            ingest,
             final_,
             final_bucket: final_bucket.into(),
         }
+    }
+
+    /// The `final` bucket's name, as bucket events name it.
+    pub fn final_bucket(&self) -> &str {
+        &self.final_bucket
     }
 
     /// One pass over every Media file and every folder in `final`.
@@ -75,35 +79,45 @@ impl Reconciler {
         Ok(())
     }
 
-    /// Checks Media file `id` alone (after a `completed` hint); an unknown
-    /// `id` is placed from its marker, if there is one.
-    pub async fn run_for(&self, id: &str) -> Result<()> {
+    /// Checks Media file `id` alone; an unknown `id` is placed from its
+    /// marker, if there is one.
+    async fn run_for(&self, id: &str) -> Result<()> {
         match self.catalogue.tracked_media_file(id).await? {
             Some(file) => self.check(&file).await,
             None => self.check_unknown(id).await,
         }
     }
 
+    /// RustFS announced a new output marker for Media file `id`: it is
+    /// checked alone, as one pass would check it. The marker is read from
+    /// `final` rather than trusted from the event, so a marker already
+    /// deleted again (a re-upload started) makes it Missing, not Ready.
+    pub async fn marker_seen(&self, id: &str) -> Result<MarkerOutcome> {
+        match self.run_for(id).await {
+            Ok(()) => Ok(MarkerOutcome::Stored),
+            Err(e) if e.downcast_ref::<serde_json::Error>().is_some() => {
+                Ok(MarkerOutcome::Unreadable(format!("{e:#}")))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     async fn check(&self, file: &TrackedMediaFile) -> Result<()> {
         let id = &file.id;
         match (self.marker(id).await?, file.state) {
-            (Some(_), MediaFileState::Ready) => {}
-            (Some(marker), _) => {
+            (Some(marker), state) => {
                 let manifests = self.manifests(id, &marker);
+                if state == MediaFileState::Ready && manifests == file.manifests {
+                    return Ok(());
+                }
                 self.catalogue.output_found(id, manifests).await?;
                 info!(media_file = %id, "ready");
             }
             (None, MediaFileState::Ready) => {
                 self.catalogue.output_lost(id).await?;
-                warn!(media_file = %id, "output gone from final: missing");
+                warn!(media_file = %id, "output marker gone from final: missing");
             }
-            (None, MediaFileState::Processing)
-                if file.overdue && self.input_exists(&file.source_key).await? =>
-            {
-                self.catalogue.transcode_failed(id, TIMED_OUT).await?;
-                warn!(media_file = %id, "no output after 24 h: failed");
-            }
-            (None, _) => {}
+            (None, MediaFileState::Missing) => {}
         }
         Ok(())
     }
@@ -135,14 +149,6 @@ impl Reconciler {
         Ok(Some(
             serde_json::from_slice(&bytes).context("invalid source.json")?,
         ))
-    }
-
-    async fn input_exists(&self, key: &str) -> Result<bool> {
-        match self.ingest.head(&Path::parse(key)?).await {
-            Ok(_) => Ok(true),
-            Err(object_store::Error::NotFound { .. }) => Ok(false),
-            Err(e) => Err(e.into()),
-        }
     }
 
     fn manifests(&self, id: &str, marker: &OutputMarker) -> Manifests {

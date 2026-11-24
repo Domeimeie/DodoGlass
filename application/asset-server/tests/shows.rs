@@ -13,9 +13,7 @@ const S01E02_ID: &str = "shows_Breaking_Bad__2008__Season_01_S01E02-bd50a00f";
 
 /// Uploads `key` and lets its transcode finish and be found.
 async fn ready(app: &TestApp, key: &str) {
-    app.upload(key).await;
     app.finish_transcode(key).await;
-    app.reconcile().await;
 }
 
 /// The id of the only listed Show.
@@ -131,11 +129,11 @@ async fn shows_are_told_apart_by_name_and_year() {
 }
 
 #[tokio::test]
-async fn an_episode_still_processing_is_hidden_and_so_are_its_season_and_show() {
+async fn an_episode_whose_only_media_file_is_missing_is_hidden_and_so_are_its_season_and_show() {
     let app = TestApp::start().await;
 
-    app.upload(S01E02).await;
-    app.reconcile().await;
+    app.finish_transcode(S01E02).await;
+    app.lose_output(S01E02).await;
 
     assert_eq!(app.get_json("/shows").await, json!([]));
 }
@@ -145,9 +143,9 @@ async fn a_season_without_a_visible_episode_is_hidden() {
     let app = TestApp::start().await;
 
     ready(&app, S01E02).await;
-    app.upload("shows/Breaking Bad (2008)/Season 02/S02E01.mkv")
+    ready(&app, "shows/Breaking Bad (2008)/Season 02/S02E01.mkv").await;
+    app.lose_output("shows/Breaking Bad (2008)/Season 02/S02E01.mkv")
         .await;
-    app.reconcile().await;
 
     let show = only_show_id(&app).await;
     assert_eq!(
@@ -163,9 +161,9 @@ async fn an_episode_without_a_ready_media_file_is_not_listed() {
     let app = TestApp::start().await;
 
     ready(&app, S01E02).await;
-    app.upload("shows/Breaking Bad (2008)/Season 01/S01E03.mkv")
+    ready(&app, "shows/Breaking Bad (2008)/Season 01/S01E03.mkv").await;
+    app.lose_output("shows/Breaking Bad (2008)/Season 01/S01E03.mkv")
         .await;
-    app.reconcile().await;
 
     let show = only_show_id(&app).await;
     let episodes = app
@@ -179,7 +177,8 @@ async fn an_episode_without_a_ready_media_file_is_not_listed() {
 async fn a_hidden_or_unknown_show_has_no_seasons() {
     let app = TestApp::start().await;
 
-    app.upload(S01E02).await;
+    app.finish_transcode(S01E02).await;
+    app.lose_output(S01E02).await;
 
     let (status, body) = app.get("/shows/1/seasons").await;
     assert_eq!(status, 404);

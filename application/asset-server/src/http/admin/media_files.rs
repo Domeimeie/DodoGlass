@@ -1,6 +1,5 @@
-//! Admin API for single Media files: their state, including Failed and
-//! Missing ones, which the read API does not list, and the admin's changes
-//! to them.
+//! Admin API for single Media files: their state, including Missing ones,
+//! which the read API does not list, and the admin's changes to them.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -21,29 +20,26 @@ pub fn routes() -> Router<ApiState> {
 
 #[derive(Deserialize)]
 struct ListQuery {
-    /// Comma-separated states (`failed,missing`); every state if absent.
+    /// `missing`: only the Missing ones; every Media file if absent.
     state: Option<String>,
 }
 
-/// `GET /admin/media-files?state=failed,missing`: the Media files in those
-/// states, by upload key, each as `GET /admin/media-files/<id>` answers (the
-/// error of a Failed one, the key of a Missing one). 400 for an unknown state.
+/// `GET /admin/media-files?state=missing`: the Missing Media files (every
+/// one without `state`), by upload key, each as `GET /admin/media-files/<id>`
+/// answers. 400 for any other `state`: only finished output is in the
+/// catalogue (ADR 0006), so there is nothing else to look for.
 async fn list(
     State(catalogue): State<Catalogue>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<MediaFileStatus>>, ApiError> {
-    let states = match query.state {
-        None => vec![
-            MediaFileState::Processing,
-            MediaFileState::Ready,
-            MediaFileState::Failed,
-            MediaFileState::Missing,
-        ],
-        Some(states) => states
-            .split(',')
-            .map(|s| MediaFileState::parse(s.trim()))
-            .collect::<Result<_, _>>()
-            .map_err(|e| ApiError::bad_request(e.to_string()))?,
+    let states = match query.state.as_deref().map(str::trim) {
+        None => vec![MediaFileState::Ready, MediaFileState::Missing],
+        Some("missing") => vec![MediaFileState::Missing],
+        Some(other) => {
+            return Err(ApiError::bad_request(format!(
+                "unknown state filter {other:?}: only \"missing\" is accepted"
+            )));
+        }
     };
     Ok(Json(catalogue.media_files_in(states).await?))
 }
@@ -85,7 +81,7 @@ async fn edit(
     )
 }
 
-/// `GET /admin/media-files/<id>`: `{"id", "key", "label", "state", "error"}`.
+/// `GET /admin/media-files/<id>`: `{"id", "key", "label", "state"}`.
 async fn show(
     State(catalogue): State<Catalogue>,
     Path(id): Path<String>,

@@ -15,16 +15,16 @@ async fn unassigned(app: &TestApp) -> Value {
 }
 
 #[tokio::test]
-async fn an_upload_without_a_year_is_listed_as_unassigned_and_processing() {
+async fn an_upload_without_a_year_is_listed_as_unassigned_and_ready() {
     let app = TestApp::start().await;
 
-    app.upload("movies/The Matrix/matrix.mkv").await;
+    app.finish_transcode("movies/The Matrix/matrix.mkv").await;
 
     let list = unassigned(&app).await;
     assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
     assert_eq!(list[0]["path"], "movies/The Matrix/matrix.mkv");
     assert_eq!(list[0]["reason"], "no_year");
-    assert_eq!(list[0]["state"], "processing");
+    assert_eq!(list[0]["state"], "ready");
 }
 
 #[tokio::test]
@@ -32,7 +32,7 @@ async fn an_unassigned_upload_is_listed_with_its_path_as_uploaded() {
     let app = TestApp::start().await;
     let nfd = "misc/Ame\u{301}lie.mkv";
 
-    app.upload(nfd).await;
+    app.finish_transcode(nfd).await;
 
     assert_eq!(unassigned(&app).await[0]["path"], nfd);
 }
@@ -41,12 +41,21 @@ async fn an_unassigned_upload_is_listed_with_its_path_as_uploaded() {
 async fn each_kind_of_upload_outside_the_layout_is_kept_with_its_reason() {
     let app = TestApp::start().await;
 
-    app.send_event(common::s3_event(&[
+    let keys = [
         "misc/clip.mp4",
         "shows/Breaking Bad (2008)/Season 01/S02E01.mkv",
         "shows/Breaking Bad (2008)/Season 01/Pilot.mkv",
-    ]))
-    .await;
+    ];
+    let mut markers = Vec::new();
+    for key in keys {
+        app.finish_transcode_without_event(key).await;
+        markers.push(format!(
+            "{}/source.json",
+            dodoglass_ids::task_id_from_key(key)
+        ));
+    }
+    let markers: Vec<&str> = markers.iter().map(String::as_str).collect();
+    app.send_marker_event(common::final_event(&markers)).await;
 
     let list = unassigned(&app).await;
     let reasons: Vec<(&str, &str)> = list
@@ -75,9 +84,7 @@ async fn each_kind_of_upload_outside_the_layout_is_kept_with_its_reason() {
 async fn an_unassigned_media_file_becomes_ready_but_is_not_in_the_read_api() {
     let app = TestApp::start().await;
 
-    app.upload("movies/The Matrix/matrix.mkv").await;
     app.finish_transcode("movies/The Matrix/matrix.mkv").await;
-    app.reconcile().await;
 
     assert_eq!(unassigned(&app).await[0]["state"], "ready");
     assert_eq!(app.get_json("/movies").await, json!([]));
@@ -85,21 +92,21 @@ async fn an_unassigned_media_file_becomes_ready_but_is_not_in_the_read_api() {
 }
 
 #[tokio::test]
-async fn a_failed_unassigned_media_file_is_listed_as_failed() {
+async fn a_missing_unassigned_media_file_is_listed_as_missing() {
     let app = TestApp::start().await;
 
-    app.upload("misc/clip.mp4").await;
-    app.fail_transcode("misc/clip.mp4", "no video stream").await;
+    app.finish_transcode("misc/clip.mp4").await;
+    app.lose_output("misc/clip.mp4").await;
 
-    assert_eq!(unassigned(&app).await[0]["state"], "failed");
+    assert_eq!(unassigned(&app).await[0]["state"], "missing");
 }
 
 #[tokio::test]
 async fn an_output_outside_the_layout_found_in_final_is_unassigned() {
     let app = TestApp::start().await;
 
-    // The asset server never saw the upload event, only the output.
-    app.finish_transcode("misc/clip.mp4").await;
+    // The marker event was lost: only the reconcile finds the output.
+    app.finish_transcode_without_event("misc/clip.mp4").await;
     app.reconcile().await;
 
     let list = unassigned(&app).await;
@@ -111,8 +118,9 @@ async fn an_output_outside_the_layout_found_in_final_is_unassigned() {
 async fn placed_media_files_are_not_unassigned() {
     let app = TestApp::start().await;
 
-    app.upload("movies/The Matrix (1999)/matrix.mkv").await;
-    app.upload("shows/Breaking Bad (2008)/Season 01/S01E02.mkv")
+    app.finish_transcode("movies/The Matrix (1999)/matrix.mkv")
+        .await;
+    app.finish_transcode("shows/Breaking Bad (2008)/Season 01/S01E02.mkv")
         .await;
 
     assert_eq!(unassigned(&app).await, json!([]));
@@ -120,9 +128,7 @@ async fn placed_media_files_are_not_unassigned() {
 
 /// Uploads `key` and lets its transcode finish and be found.
 async fn ready(app: &TestApp, key: &str) {
-    app.upload(key).await;
     app.finish_transcode(key).await;
-    app.reconcile().await;
 }
 
 /// The id of the only Unassigned media file.
@@ -140,9 +146,12 @@ async fn attach(app: &TestApp, id: &str, to: Value) -> (axum::http::StatusCode, 
 #[tokio::test]
 async fn an_attached_media_file_is_listed_in_its_movie_once_ready() {
     let app = TestApp::start().await;
-    // The Movie exists, Hidden: its only Media file is still Processing.
-    app.upload("movies/Dune (2021)/dune.mkv").await;
-    app.upload("movies/Dune/dune-extended.mkv").await;
+    // The Movie exists, Hidden: its only Media file is Missing. So is the
+    // Unassigned one.
+    app.finish_transcode("movies/Dune (2021)/dune.mkv").await;
+    app.lose_output("movies/Dune (2021)/dune.mkv").await;
+    app.finish_transcode("movies/Dune/dune-extended.mkv").await;
+    app.lose_output("movies/Dune/dune-extended.mkv").await;
     let id = only_unassigned_id(&app).await;
 
     let (status, _) = attach(
@@ -156,7 +165,6 @@ async fn an_attached_media_file_is_listed_in_its_movie_once_ready() {
     assert_eq!(app.get_json("/movies").await, json!([]));
 
     app.finish_transcode("movies/Dune/dune-extended.mkv").await;
-    app.reconcile().await;
     let movies = app.get_json("/movies").await;
     assert_eq!(movies[0]["name"], "Dune");
     assert_eq!(movies[0]["year"], 2021);
@@ -198,8 +206,9 @@ async fn an_attached_media_file_gets_a_label_free_in_its_movie() {
 #[tokio::test]
 async fn an_attached_media_file_does_not_take_over_the_default() {
     let app = TestApp::start().await;
-    // alien.mkv came first, so it stays the default even while Processing.
-    app.upload("movies/Alien (1979)/alien.mkv").await;
+    // alien.mkv came first, so it stays the default, even while Missing.
+    app.finish_transcode("movies/Alien (1979)/alien.mkv").await;
+    app.lose_output("movies/Alien (1979)/alien.mkv").await;
     ready(&app, "movies/Alien/alien-remastered.mkv").await;
     let id = only_unassigned_id(&app).await;
 
@@ -210,12 +219,12 @@ async fn an_attached_media_file_does_not_take_over_the_default() {
     )
     .await;
 
-    let file = &app.get_json("/movies").await[0]["media_files"][0];
-    assert_eq!(file["label"], "alien-remastered");
-    assert_eq!(
-        file["default"], false,
-        "alien.mkv came first and is the default"
-    );
+    app.finish_transcode("movies/Alien (1979)/alien.mkv").await;
+    let files = &app.get_json("/movies").await[0]["media_files"];
+    assert_eq!(files[0]["label"], "alien");
+    assert_eq!(files[0]["default"], true, "alien.mkv came first");
+    assert_eq!(files[1]["label"], "alien-remastered");
+    assert_eq!(files[1]["default"], false);
 }
 
 #[tokio::test]
@@ -251,7 +260,7 @@ async fn an_unassigned_media_file_can_be_attached_to_an_episode() {
 async fn attaching_to_a_movie_or_episode_that_does_not_exist_is_refused() {
     let app = TestApp::start().await;
     ready(&app, "shows/Breaking Bad (2008)/Season 01/S01E01.mkv").await;
-    app.upload("misc/clip.mp4").await;
+    app.finish_transcode("misc/clip.mp4").await;
     let id = only_unassigned_id(&app).await;
 
     let no_movie = json!({ "movie": { "name": "Dune", "year": 1984 } });

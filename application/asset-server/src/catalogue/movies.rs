@@ -25,9 +25,45 @@ pub struct MovieView {
 pub struct MediaFileView {
     pub id: String,
     pub label: String,
-    /// Whether this is the Default media file of its Movie or Episode.
+    /// Whether this is the Default media file of its Movie or Episode, as
+    /// viewers see it (see [`show_default`]).
     pub default: bool,
     pub manifests: Manifests,
+    /// When it was first placed: the oldest one stands in for the default.
+    #[serde(skip)]
+    created_ms: i64,
+}
+
+impl From<ReadyMediaFileRow> for MediaFileView {
+    fn from(row: ReadyMediaFileRow) -> Self {
+        MediaFileView {
+            id: row.id,
+            label: row.label,
+            default: row.is_default,
+            manifests: Manifests {
+                hls: row.hls_manifest,
+                dash: row.dash_manifest,
+            },
+            created_ms: row.created_ms,
+        }
+    }
+}
+
+/// The Ready Media files of one Movie or Episode, as viewers see them. While
+/// the stored Default media file is not among them (Missing, for instance
+/// while a re-upload of it is transcoded), the oldest Ready one is shown as
+/// the default instead. That choice is not stored: once the stored default is
+/// Ready again, it is the default again (ADR 0006).
+pub(super) fn show_default(files: &mut [MediaFileView]) {
+    if files.iter().any(|f| f.default) {
+        return;
+    }
+    if let Some(oldest) = files
+        .iter_mut()
+        .min_by(|a, b| (a.created_ms, &a.id).cmp(&(b.created_ms, &b.id)))
+    {
+        oldest.default = true;
+    }
 }
 
 /// The id of the Movie from the folder `<name> (<year>)`, if it exists.
@@ -70,12 +106,13 @@ struct MovieRow {
 
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = media_file)]
-struct ReadyMediaFileRow {
+pub(super) struct ReadyMediaFileRow {
     id: String,
     label: String,
     is_default: bool,
     hls_manifest: Option<String>,
     dash_manifest: Option<String>,
+    created_ms: i64,
 }
 
 impl Catalogue {
@@ -107,15 +144,10 @@ impl Catalogue {
                         movies.push((m.id, view));
                     }
                     let (_, movie) = movies.last_mut().expect("just pushed");
-                    movie.media_files.push(MediaFileView {
-                        id: file.id,
-                        label: file.label,
-                        default: file.is_default,
-                        manifests: Manifests {
-                            hls: file.hls_manifest,
-                            dash: file.dash_manifest,
-                        },
-                    });
+                    movie.media_files.push(file.into());
+                }
+                for (_, movie) in &mut movies {
+                    show_default(&mut movie.media_files);
                 }
                 metadata::fill_views(conn, &mut movies)?;
                 Ok(movies.into_iter().map(|(_, m)| m).collect())

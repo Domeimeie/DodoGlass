@@ -21,7 +21,6 @@ diesel::table! {
         created_ms -> BigInt,
         hls_manifest -> Nullable<Text>,
         dash_manifest -> Nullable<Text>,
-        error -> Nullable<Text>,
         episode_id -> Nullable<Integer>,
         is_default -> Bool,
     }

@@ -1,10 +1,10 @@
 //! Several Media files per Movie or Episode: Labels, the Default media file, and
-//! re-uploads to the same path.
+//! re-uploads to the same path (ADR 0006: the old marker is gone until the new
+//! transcode completes, and the Default media file stays where it is).
 
 mod common;
 
 use common::TestApp;
-use object_store::ObjectStoreExt;
 use serde_json::{Value, json};
 
 const MATRIX: &str = "movies/The Matrix (1999)/matrix.mkv";
@@ -25,18 +25,12 @@ fn labels(movies: &Value) -> Vec<(String, bool)> {
         .collect()
 }
 
-async fn upload_ready(app: &TestApp, key: &str) {
-    app.upload(key).await;
-    app.finish_transcode(key).await;
-}
-
 #[tokio::test]
 async fn two_uploads_in_one_movie_folder_are_one_movie_with_two_labelled_media_files() {
     let app = TestApp::start().await;
 
-    upload_ready(&app, MATRIX).await;
-    upload_ready(&app, DIRECTORS_CUT).await;
-    app.reconcile().await;
+    app.finish_transcode(MATRIX).await;
+    app.finish_transcode(DIRECTORS_CUT).await;
 
     let movies = app.get_json("/movies").await;
     assert_eq!(movies.as_array().unwrap().len(), 1);
@@ -53,10 +47,11 @@ async fn two_uploads_in_one_movie_folder_are_one_movie_with_two_labelled_media_f
 async fn a_label_taken_in_the_same_movie_gets_the_extension_added() {
     let app = TestApp::start().await;
 
-    upload_ready(&app, MATRIX).await;
-    upload_ready(&app, "movies/The Matrix (1999)/matrix.mp4").await;
-    upload_ready(&app, "movies/The Matrix (1999)/matrix (mp4).mkv").await;
-    app.reconcile().await;
+    app.finish_transcode(MATRIX).await;
+    app.finish_transcode("movies/The Matrix (1999)/matrix.mp4")
+        .await;
+    app.finish_transcode("movies/The Matrix (1999)/matrix (mp4).mkv")
+        .await;
 
     assert_eq!(
         labels(&app.get_json("/movies").await),
@@ -73,9 +68,9 @@ async fn a_label_taken_in_the_same_movie_gets_the_extension_added() {
 async fn the_same_label_in_two_movies_is_no_collision() {
     let app = TestApp::start().await;
 
-    upload_ready(&app, MATRIX).await;
-    upload_ready(&app, "movies/The Matrix Reloaded (2003)/matrix.mp4").await;
-    app.reconcile().await;
+    app.finish_transcode(MATRIX).await;
+    app.finish_transcode("movies/The Matrix Reloaded (2003)/matrix.mp4")
+        .await;
 
     let movies = app.get_json("/movies").await;
     assert_eq!(movies[0]["media_files"][0]["label"], "matrix");
@@ -85,48 +80,11 @@ async fn the_same_label_in_two_movies_is_no_collision() {
 }
 
 #[tokio::test]
-async fn only_ready_media_files_are_listed() {
+async fn a_re_upload_of_the_default_keeps_its_label_and_is_the_default_again_once_ready() {
     let app = TestApp::start().await;
-
-    upload_ready(&app, MATRIX).await;
-    app.upload(DIRECTORS_CUT).await;
-    app.reconcile().await;
-
-    assert_eq!(
-        labels(&app.get_json("/movies").await),
-        vec![("matrix".to_string(), true)]
-    );
-}
-
-#[tokio::test]
-async fn the_default_is_the_first_upload_even_if_another_is_ready_first() {
-    let app = TestApp::start().await;
-
-    app.upload(MATRIX).await;
-    upload_ready(&app, DIRECTORS_CUT).await;
-    app.reconcile().await;
-    assert_eq!(
-        labels(&app.get_json("/movies").await),
-        vec![("matrix-directors-cut".to_string(), false)]
-    );
-
     app.finish_transcode(MATRIX).await;
-    app.reconcile().await;
-    assert_eq!(
-        labels(&app.get_json("/movies").await),
-        vec![
-            ("matrix".to_string(), true),
-            ("matrix-directors-cut".to_string(), false),
-        ]
-    );
-}
-
-#[tokio::test]
-async fn a_re_upload_keeps_the_media_file_and_is_processing_until_its_new_output_is_complete() {
-    let app = TestApp::start().await;
-    upload_ready(&app, MATRIX).await;
-    upload_ready(&app, "movies/The Matrix (1999)/matrix.mp4").await;
-    app.reconcile().await;
+    app.finish_transcode("movies/The Matrix (1999)/matrix.mp4")
+        .await;
     let before = app.get_json("/movies").await[0]["media_files"].clone();
     assert_eq!(
         before,
@@ -146,31 +104,28 @@ async fn a_re_upload_keeps_the_media_file_and_is_processing_until_its_new_output
         ])
     );
 
-    // A new version of `matrix.mkv`: the transcoder replaces its output, so
-    // it is Processing until the new `source.json` appears.
-    let marker = format!("{}/source.json", before[0]["id"].as_str().unwrap());
-    app.buckets.final_.delete(&marker.into()).await.unwrap();
-    app.upload(MATRIX).await;
+    // A new version of `matrix.mkv`: the transcoder deletes its marker
+    // first, so it is Missing until the new `source.json` appears. Meanwhile
+    // the other Ready one is shown as the default.
+    app.start_retranscode(MATRIX).await;
     app.reconcile().await;
     assert_eq!(
         labels(&app.get_json("/movies").await),
-        vec![("matrix (mp4)".to_string(), false)]
+        vec![("matrix (mp4)".to_string(), true)]
     );
 
     app.finish_transcode(MATRIX).await;
-    app.reconcile().await;
     assert_eq!(app.get_json("/movies").await[0]["media_files"], before);
 }
 
 #[tokio::test]
-async fn uploading_the_same_path_again_makes_no_duplicate() {
+async fn transcoding_the_same_path_again_makes_no_duplicate() {
     let app = TestApp::start().await;
-    upload_ready(&app, MATRIX).await;
-    app.reconcile().await;
+    app.finish_transcode(MATRIX).await;
 
-    app.upload(MATRIX).await;
-    app.upload(MATRIX).await;
-    app.reconcile().await;
+    app.start_retranscode(MATRIX).await;
+    app.finish_transcode(MATRIX).await;
+    app.finish_transcode(MATRIX).await;
 
     let movies = app.get_json("/movies").await;
     assert_eq!(movies.as_array().unwrap().len(), 1);
@@ -190,16 +145,14 @@ async fn season_1(app: &TestApp) -> Value {
 async fn an_episode_has_labelled_media_files_and_a_default_like_a_movie() {
     let app = TestApp::start().await;
 
-    upload_ready(&app, S01E02).await;
-    upload_ready(&app, "shows/Breaking Bad (2008)/Season 01/S01E02.mp4").await;
-    upload_ready(
-        &app,
-        "shows/Breaking Bad (2008)/Season 01/S01E02 - extended.mkv",
-    )
-    .await;
+    app.finish_transcode(S01E02).await;
+    app.finish_transcode("shows/Breaking Bad (2008)/Season 01/S01E02.mp4")
+        .await;
+    app.finish_transcode("shows/Breaking Bad (2008)/Season 01/S01E02 - extended.mkv")
+        .await;
     // The same Label in another Episode is no collision.
-    upload_ready(&app, "shows/Breaking Bad (2008)/Season 01/S01E03.mkv").await;
-    app.reconcile().await;
+    app.finish_transcode("shows/Breaking Bad (2008)/Season 01/S01E03.mkv")
+        .await;
 
     let episodes = season_1(&app).await;
     assert_eq!(
@@ -217,24 +170,18 @@ async fn an_episode_has_labelled_media_files_and_a_default_like_a_movie() {
 #[tokio::test]
 async fn a_re_upload_of_an_episode_keeps_its_media_file() {
     let app = TestApp::start().await;
-    upload_ready(&app, S01E02).await;
-    upload_ready(&app, "shows/Breaking Bad (2008)/Season 01/S01E02.mp4").await;
-    app.reconcile().await;
+    app.finish_transcode(S01E02).await;
+    app.finish_transcode("shows/Breaking Bad (2008)/Season 01/S01E02.mp4")
+        .await;
     let before = season_1(&app).await;
 
-    let marker = format!(
-        "{}/source.json",
-        before[0]["media_files"][0]["id"].as_str().unwrap()
-    );
-    app.buckets.final_.delete(&marker.into()).await.unwrap();
-    app.upload(S01E02).await;
+    app.start_retranscode(S01E02).await;
     app.reconcile().await;
     assert_eq!(
         labels(&season_1(&app).await),
-        vec![("S01E02 (mp4)".to_string(), false)]
+        vec![("S01E02 (mp4)".to_string(), true)]
     );
 
     app.finish_transcode(S01E02).await;
-    app.reconcile().await;
     assert_eq!(season_1(&app).await, before);
 }

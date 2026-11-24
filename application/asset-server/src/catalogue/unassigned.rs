@@ -18,7 +18,7 @@ use super::{Catalogue, media_files, movies, shows};
 #[derive(Debug, Clone, Serialize)]
 pub struct UnassignedView {
     pub id: String,
-    /// The upload key in `ingest`.
+    /// The upload key, as the output marker records it.
     pub path: String,
     /// Why the path does not fit the upload layout (`no_year`, ...).
     pub reason: Option<&'static str>,

@@ -10,8 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use asset_server::app::{App, Config};
 use asset_server::ports::clock::SystemClock;
-use asset_server::ports::mqtt::{MqttSettings, MqttUploadEvents};
-use asset_server::ports::mqtt_status::{MqttStatusHints, MqttStatusSettings};
+use asset_server::ports::mqtt_markers::{MqttMarkerEvents, MqttSettings};
 use asset_server::ports::storage::{Buckets, S3Settings};
 use asset_server::ports::tmdb::{NoTmdb, Tmdb, TmdbClient, TmdbSettings};
 use clap::{Parser, ValueEnum};
@@ -32,29 +31,21 @@ struct Cli {
     #[arg(long, env = "ASSETS_HTTP_ADDR", default_value = "127.0.0.1:8090")]
     http_addr: SocketAddr,
 
-    /// MQTT broker the bucket events arrive through
+    /// MQTT broker the events of new output markers in `final` arrive through
     #[arg(long, env = "ASSETS_MQTT_URL", default_value = "mqtt://localhost:1883")]
     mqtt_url: String,
 
-    /// Topic the bucket events of `ingest` arrive on
-    #[arg(long, env = "ASSETS_MQTT_TOPIC", default_value = "dodoglass/ingest")]
+    /// Topic RustFS publishes new output markers (`<id>/source.json`) in `final` on
+    #[arg(long, env = "ASSETS_MQTT_TOPIC", default_value = "dodoglass/final")]
     mqtt_topic: String,
 
-    /// Shared-subscription group; must differ from the transcoders' group
+    /// Shared-subscription group of the asset server
     #[arg(long, env = "ASSETS_MQTT_GROUP", default_value = "assets")]
     mqtt_group: String,
 
-    /// MQTT client id [default: assets-<hostname>-<pid>]; the status connection adds `-status`
+    /// MQTT client id [default: assets-<hostname>-<pid>]
     #[arg(long, env = "ASSETS_MQTT_CLIENT_ID")]
     mqtt_client_id: Option<String>,
-
-    /// Topic the transcoders publish their status on (hints for an early reconcile)
-    #[arg(
-        long,
-        env = "ASSETS_MQTT_STATUS_TOPIC",
-        default_value = "dodoglass/status"
-    )]
-    mqtt_status_topic: String,
 
     /// S3 endpoint, e.g. http://localhost:9000
     #[arg(long, env = "ASSETS_S3_ENDPOINT")]
@@ -71,10 +62,6 @@ struct Cli {
     /// S3 region
     #[arg(long, env = "ASSETS_S3_REGION", default_value = "us-east-1")]
     s3_region: String,
-
-    /// Bucket videos are uploaded to
-    #[arg(long, env = "ASSETS_INGEST_BUCKET", default_value = "ingest")]
-    ingest_bucket: String,
 
     /// Bucket the transcoder writes its outputs to
     #[arg(long, env = "ASSETS_FINAL_BUCKET", default_value = "final")]
@@ -145,7 +132,6 @@ async fn run(cli: Cli) -> Result<()> {
             secret_key: cli.s3_secret_key,
             region: cli.s3_region,
         },
-        &cli.ingest_bucket,
         &cli.final_bucket,
         &cli.assets_bucket,
     )?;
@@ -164,21 +150,14 @@ async fn run(cli: Cli) -> Result<()> {
     info!(database = %cli.database, "catalogue open, startup reconcile done");
 
     let client_id = cli.mqtt_client_id.unwrap_or_else(default_client_id);
-    let events = MqttUploadEvents::connect(MqttSettings {
-        broker: cli.mqtt_url.clone(),
+    let events = MqttMarkerEvents::connect(MqttSettings {
+        broker: cli.mqtt_url,
         topic: cli.mqtt_topic,
         group: cli.mqtt_group,
-        client_id: client_id.clone(),
+        client_id,
     })
     .await?;
-    app.spawn_ingest_listener(events);
-    let hints = MqttStatusHints::connect(MqttStatusSettings {
-        broker: cli.mqtt_url,
-        topic: cli.mqtt_status_topic,
-        client_id: format!("{client_id}-status"),
-    })
-    .await?;
-    app.spawn_status_listener(hints);
+    app.spawn_marker_listener(events);
     app.spawn_periodic_reconcile(Duration::from_secs(cli.reconcile_interval));
     if cli.tmdb_api_key.is_some() {
         app.spawn_periodic_matcher(Duration::from_secs(cli.tmdb_interval));

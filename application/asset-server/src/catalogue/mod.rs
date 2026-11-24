@@ -1,10 +1,10 @@
 //! The Catalogue: Movies and Shows, their Media files, and the rules about them.
 //! Every change and every read of the catalogue goes through here; the HTTP
-//! layer, the ingest listener and the reconciler stay thin.
+//! layer, the marker listener and the reconciler stay thin.
 //!
-//! - [`placement`]: an upload seen in `ingest` becomes a Media file, placed
-//!   from its path (ADR 0003);
-//! - [`media_files`]: Media file states (Processing, Ready, Failed, Missing);
+//! - [`placement`]: a finished upload becomes a Media file, placed from its
+//!   path (ADR 0003);
+//! - [`media_files`]: Media file states (Ready, Missing);
 //! - [`match_state`]: where a TMDB lookup stands (Matched, Needs review, ...);
 //! - [`movies`]: Movies, and what viewers see of them;
 //! - [`shows`]: Shows, Seasons and Episodes, and what viewers see of them;
@@ -40,9 +40,7 @@ use crate::ports::clock::Clock;
 
 pub use admin::{Change, Entry};
 pub use corrections::{Edited, MovieLookup, PartRefresh, ShowLookup};
-pub use media_files::{
-    Manifests, MediaFileState, MediaFileStatus, PROCESSING_TIMEOUT_MS, TIMED_OUT, TrackedMediaFile,
-};
+pub use media_files::{Manifests, MediaFileState, MediaFileStatus, TrackedMediaFile};
 pub use metadata::{
     Candidate, LOCKABLE_FIELDS, LockedFields, LookupDue, MovieMatch, MovieMetadataView,
     NeedsReviewMovie,

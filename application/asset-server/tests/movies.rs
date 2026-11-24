@@ -13,9 +13,7 @@ const MATRIX_ID: &str = "movies_The_Matrix__1999__matrix-48c3476c";
 async fn a_movie_upload_is_listed_once_its_transcode_is_ready() {
     let app = TestApp::start().await;
 
-    app.upload(MATRIX).await;
     app.finish_transcode(MATRIX).await;
-    app.reconcile().await;
 
     assert_eq!(
         app.get_json("/movies").await,
@@ -37,21 +35,20 @@ async fn a_movie_upload_is_listed_once_its_transcode_is_ready() {
 }
 
 #[tokio::test]
-async fn a_movie_still_processing_is_hidden() {
+async fn a_movie_whose_only_media_file_is_missing_is_hidden() {
     let app = TestApp::start().await;
+    app.finish_transcode(MATRIX).await;
 
-    app.upload(MATRIX).await;
-    app.reconcile().await;
+    app.lose_output(MATRIX).await;
 
     assert_eq!(app.get_json("/movies").await, json!([]));
 }
 
 #[tokio::test]
-async fn the_output_marker_counts_only_once_a_reconcile_has_run() {
+async fn without_its_event_the_output_marker_counts_once_a_reconcile_has_run() {
     let app = TestApp::start().await;
 
-    app.upload(MATRIX).await;
-    app.finish_transcode(MATRIX).await;
+    app.finish_transcode_without_event(MATRIX).await;
     assert_eq!(app.get_json("/movies").await, json!([]));
 
     app.reconcile().await;
@@ -61,9 +58,7 @@ async fn the_output_marker_counts_only_once_a_reconcile_has_run() {
 #[tokio::test]
 async fn a_transcode_finished_while_the_asset_server_was_down_is_found_at_startup() {
     let app = TestApp::start().await;
-    app.upload(MATRIX).await;
-
-    app.finish_transcode(MATRIX).await;
+    app.finish_transcode_without_event(MATRIX).await;
     let app = app.restart().await;
 
     let movies = app.get_json("/movies").await;
@@ -75,10 +70,8 @@ async fn a_transcode_finished_while_the_asset_server_was_down_is_found_at_startu
 async fn an_upload_outside_the_layout_is_not_listed() {
     let app = TestApp::start().await;
 
-    // The fixture as RustFS sent it: `sample.mp4` at the root of `ingest`.
-    app.send_event(common::rustfs_event()).await;
+    // `sample.mp4` at the root of `ingest`.
     app.finish_transcode("sample.mp4").await;
-    app.reconcile().await;
 
     assert_eq!(app.get_json("/movies").await, json!([]));
 }
@@ -88,10 +81,12 @@ async fn every_record_of_a_message_is_placed_with_its_key_decoded() {
     let app = TestApp::start().await;
     let amelie = "movies/Amélie (2001)/amélie [director's cut]+extra.mkv";
 
-    app.send_event(common::s3_event(&[MATRIX, amelie])).await;
-    app.finish_transcode(MATRIX).await;
-    app.finish_transcode(amelie).await;
-    app.reconcile().await;
+    app.finish_transcode_without_event(MATRIX).await;
+    app.finish_transcode_without_event(amelie).await;
+
+    let marker = |key| format!("{}/source.json", dodoglass_ids::task_id_from_key(key));
+    app.send_marker_event(common::final_event(&[&marker(MATRIX), &marker(amelie)]))
+        .await;
 
     let movies = app.get_json("/movies").await;
     assert_eq!(movies[0]["name"], "Amélie");
@@ -109,9 +104,8 @@ async fn nfc_and_nfd_spellings_of_a_path_are_the_same_movie() {
     let nfc = "movies/Am\u{e9}lie (2001)/amelie.mkv";
     let nfd = "movies/Ame\u{301}lie (2001)/amelie.mkv";
 
-    app.upload(nfd).await;
+    app.finish_transcode(nfd).await;
     app.finish_transcode(nfc).await;
-    app.reconcile().await;
 
     assert_eq!(
         app.get_json("/movies").await,
