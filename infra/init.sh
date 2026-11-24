@@ -23,6 +23,17 @@ for bucket in ingest final assets; do
     fi
 done
 
+# The upload layout's top folders (ADR 0003), as empty marker objects so they stay visible in the
+# web console even when no upload is waiting. Not videos, so the event rule ignores them.
+for folder in movies shows; do
+    if aws s3api head-object --bucket ingest --key "$folder/" > /dev/null 2>&1; then
+        echo "folder ingest/$folder/: exists"
+    else
+        aws s3api put-object --bucket ingest --key "$folder/" > /dev/null
+        echo "folder ingest/$folder/: created"
+    fi
+done
+
 # Replaces the whole notification config of the bucket with the file's content.
 aws s3api put-bucket-notification-configuration --bucket ingest \
     --notification-configuration file:///init/ingest-notification.json

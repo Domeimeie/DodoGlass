@@ -143,6 +143,8 @@ it on every `docker compose up` instead:
 
 1. wait until RustFS answers,
 2. create `ingest`, `final` and `assets` unless they exist,
+   and the empty folders `movies/` and `shows/` in `ingest` (marker objects: S3 has no real folders,
+   so without them a folder vanishes once its last upload is consumed; not videos, so no event),
 3. set the event rule from `ingest-notification.json`. This *replaces* the bucket's whole
    notification config, so the file is the single source of truth.
 

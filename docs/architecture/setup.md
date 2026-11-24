@@ -51,6 +51,8 @@ waiting for RustFS at http://rustfs:9000 ...
 bucket ingest: created
 bucket final: created
 bucket assets: created
+folder ingest/movies/: created
+folder ingest/shows/: created
 event rule on ingest: set (.mp4 .mov .mkv -> MQTT topic dodoglass/ingest)
 init-1 exited with code 0
 ```
@@ -60,7 +62,8 @@ On later starts it says `exists` instead of `created`.
 ## 4. Check that it works
 
 **Web console:** open <http://localhost:9001>, log in with `rustfsadmin` / `rustfsadmin`. The buckets
-`ingest`, `final` and `assets` are listed.
+`ingest`, `final` and `assets` are listed; `ingest` contains the empty folders `movies/` and `shows/`
+to upload into (step 7).
 
 **Events:** in one terminal, print every MQTT message:
 
