@@ -311,13 +311,14 @@ pub fn final_event(keys: &[&str]) -> Vec<u8> {
     serde_json::to_vec(&event).unwrap()
 }
 
-/// `The Matrix (1999)` → `The+Matrix+%281999%29`, as in S3 event keys.
+/// `abc/source.json` → `abc%2Fsource.json`, `The Matrix (1999)` →
+/// `The+Matrix+%281999%29`: form-encoded, as RustFS sends keys in events
+/// (checked against a real event for a marker in `final`).
 fn form_encode(key: &str) -> String {
     const KEEP: &AsciiSet = &NON_ALPHANUMERIC
         .remove(b'-')
         .remove(b'_')
         .remove(b'.')
-        .remove(b'/')
         .remove(b' ');
     utf8_percent_encode(key, KEEP).to_string().replace(' ', "+")
 }

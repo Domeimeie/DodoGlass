@@ -1,6 +1,6 @@
 #!/bin/sh
 # One-shot setup of RustFS, run by the `init` service in compose.yml.
-# Safe to run any number of times: existing buckets are kept, the event rule is set again.
+# Safe to run any number of times: existing buckets are kept, the event rules are set again.
 set -eu
 
 echo "waiting for RustFS at $AWS_ENDPOINT_URL ..."
@@ -34,7 +34,14 @@ for folder in movies shows; do
     fi
 done
 
-# Replaces the whole notification config of the bucket with the file's content.
+# Each call replaces the whole notification config of the bucket with the file's content.
 aws s3api put-bucket-notification-configuration --bucket ingest \
     --notification-configuration file:///init/ingest-notification.json
 echo "event rule on ingest: set (.mp4 .mov .mkv -> MQTT topic dodoglass/ingest)"
+
+# New output markers only (ADR 0006): the asset server places a Media file once its transcode is
+# complete. A separate topic, which the transcoders do not subscribe to, so output never triggers
+# a transcode.
+aws s3api put-bucket-notification-configuration --bucket final \
+    --notification-configuration file:///init/final-notification.json
+echo "event rule on final: set (source.json -> MQTT topic dodoglass/final)"

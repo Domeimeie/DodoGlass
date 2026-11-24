@@ -16,17 +16,24 @@ services:
       - "9001:9001" # web console
     environment:
       RUSTFS_VOLUMES: /data
-      # Bucket events -> MQTT target named "primary" (the _PRIMARY suffix sets the name)
+      # Bucket events -> MQTT targets; the suffix names the target. A target has one topic, so
+      # each topic is a target of its own.
       RUSTFS_NOTIFY_ENABLE: "true"
+      # "primary": uploads to ingest, for the transcoders
       RUSTFS_NOTIFY_MQTT_ENABLE_PRIMARY: "on"
       RUSTFS_NOTIFY_MQTT_BROKER_PRIMARY: mqtt://mosquitto:1883
       RUSTFS_NOTIFY_MQTT_TOPIC_PRIMARY: dodoglass/ingest
       RUSTFS_NOTIFY_MQTT_QOS_PRIMARY: "1"
+      # "final": new output markers in final, for the asset server (ADR 0006)
+      RUSTFS_NOTIFY_MQTT_ENABLE_FINAL: "on"
+      RUSTFS_NOTIFY_MQTT_BROKER_FINAL: mqtt://mosquitto:1883
+      RUSTFS_NOTIFY_MQTT_TOPIC_FINAL: dodoglass/final
+      RUSTFS_NOTIFY_MQTT_QOS_FINAL: "1"
     volumes:
       - rustfs-data:/data
     depends_on: [mosquitto]
 
-  # Runs once and exits: creates the buckets and the event rule (infra/init.sh).
+  # Runs once and exits: creates the buckets and the event rules (infra/init.sh).
   # Uses the AWS CLI image, so the host needs no S3 client installed.
   init:
     image: amazon/aws-cli:2.39.5
@@ -39,6 +46,7 @@ services:
     volumes:
       - ./init.sh:/init/init.sh:ro,Z
       - ./ingest-notification.json:/init/ingest-notification.json:ro,Z
+      - ./final-notification.json:/init/final-notification.json:ro,Z
     depends_on: [rustfs]
     restart: "no"
 

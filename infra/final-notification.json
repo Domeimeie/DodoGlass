@@ -1,0 +1,10 @@
+{
+  "QueueConfigurations": [
+    {
+      "Id": "final-marker",
+      "QueueArn": "arn:rustfs:sqs:us-east-1:final:mqtt",
+      "Events": ["s3:ObjectCreated:*"],
+      "Filter": { "Key": { "FilterRules": [{ "Name": "suffix", "Value": "source.json" }] } }
+    }
+  ]
+}
