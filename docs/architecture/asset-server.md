@@ -8,7 +8,7 @@ belong to them. It plays both the *Library service* and the *Metadata service* o
 [system architecture](architecture.md); they can be split later if enrichment needs its own scaling.
 
 Terms are defined in `GLOSSARY.md` at the repository root; the decisions behind this page are recorded
-in `docs/adr/` (ADR 0001–0005).
+in `docs/adr/` (ADR 0001–0006).
 
 | | |
 |---|---|
@@ -22,43 +22,46 @@ in `docs/adr/` (ADR 0001–0005).
 
 The tracer bullet (a Movie upload becomes listable), then Shows, TMDB metadata and Ratings.
 
-- **Ingest listener** on `$share/assets/dodoglass/ingest`. It reads the standard S3 part of each
-  event, URL-decodes the keys, handles several records per message, and acknowledges a message only
-  after it is stored.
-- **Placement of Movies:** `movies/<Name> (<Year>)/<label>.<ext>` creates the Movie (or finds it) and
-  a **Processing** Media file whose id is the shared crate's task id. The key is read in NFC for placing and for the id
-  (so NFC and NFD spellings are the same Movie and Media file), but stored as uploaded: S3 keys are
-  byte-exact, so the 24 h check finds the input in `ingest` and the admin API shows the real path. A
+- **Marker listener** on `$share/assets/dodoglass/final` (ADR 0006): RustFS publishes every new
+  `<id>/source.json` in `final` there (QoS 1). The listener reads the standard S3 part of each
+  event, URL-decodes the keys (RustFS sends `abc%2Fsource.json`), handles several records per
+  message and ignores any other object. It reads the marker from `final` and places its Media file
+  as **Ready**, or makes a known one Ready again, then acknowledges the message; one that could not
+  be stored is not acknowledged and comes again. Handling the same marker twice changes nothing
+  (delivery is at least once). An unreadable marker is acknowledged and left to the reconcile's
+  warnings. The asset server does not listen to `dodoglass/ingest` or `dodoglass/status`, and does
+  not read `ingest` at all.
+- **Placement of Movies:** the marker's `input.key` `movies/<Name> (<Year>)/<label>.<ext>` creates
+  the Movie (or finds it) and a Ready Media file whose id is the shared crate's task id. The key is
+  read in NFC for placing and for the id (so NFC and NFD spellings are the same Movie and Media
+  file), but stored as uploaded: S3 keys are byte-exact, and the admin API shows the real path. A
   re-upload under the other spelling stores that spelling.
 - **Placement of Episodes:** `shows/<Name> (<Year>)/Season <n>/S<nn>E<nn>…` (or `Specials/`, Season
   0) finds or creates the Show (by folder name and year), its Season (by number) and its Episode (by
-  number), and a Processing Media file attached to the Episode. Every other upload is stored without
-  a Movie or Episode (Unassigned).
+  number), and a Ready Media file attached to the Episode. Every other path is stored without a
+  Movie or Episode (Unassigned), also Ready.
 - **Several Media files per Movie:** each one's Label is its file name without the extension, made
   unique within the Movie (`matrix.mkv` + `matrix.mp4` → "matrix", "matrix (mp4)"; a number is
-  added if that is taken too). The first one uploaded is the **Default media file**. A re-upload to
-  the same path keeps the id, Label and default flag and goes back to Processing. Labels and the
-  default are kept per *owner* of the Media file (`media_file.is_default`, unique indexes per
-  owner), so Movies and Episodes follow the same rules. When the default is removed, goes
-  **Missing** or **Failed**, the oldest remaining Ready Media file (by first upload) takes over;
-  with none, a Missing or Failed default stays the default, and a removed one hands over to the
-  oldest remaining Media file whatever its state.
-- **Reconciler:** a Processing Media file becomes **Ready** when `final/<id>/source.json` exists, at
-  startup and every `--reconcile-interval` seconds (default 300). Its manifest keys follow the
-  `formats` in the marker. Each pass also checks the other states:
+  added if that is taken too). The first one placed is the **Default media file**. A re-upload to
+  the same path keeps the id, Label and default flag; it is **Missing** while the transcoder
+  replaces its output (the old marker is deleted first) and Ready again with the new marker. Labels
+  and the default are kept per *owner* of the Media file (`media_file.is_default`, unique indexes
+  per owner), so Movies and Episodes follow the same rules. The stored default only moves when the
+  default is **removed**: the oldest remaining Ready Media file (by first placing) takes over, or,
+  with none, the oldest remaining one whatever its state. While the default is Missing, the read
+  API marks the oldest Ready Media file as default instead, without storing it; once the default is
+  Ready again it is the default again.
+- **Reconciler**, the safety net for lost events (ADR 0001): at startup and every
+  `--reconcile-interval` seconds (default 300) every Media file is checked against
+  `final/<id>/source.json`; the marker listener runs the same check for one Media file. Its
+  manifest keys follow the `formats` in the marker.
   - a Ready Media file whose marker is gone becomes **Missing**, and Ready again when it is back;
     it is never deleted automatically;
-  - a Media file Processing for more than 24 h whose input is still in `ingest` becomes **Failed**
-    (the transcoder deletes the input once done, so a gone input is not a failure);
-  - a Failed or Missing one whose marker is there becomes Ready (the marker is the source of truth,
-    ADR 0001; e.g. a task redelivered to another worker that finished it);
+  - a Missing one whose marker is there becomes Ready (the marker is the source of truth);
   - a folder in `final` with no Media file is placed from the `input.key` of its marker, as Ready,
     if that key gives the folder's id.
-- **Status hints:** the asset server subscribes to `dodoglass/status` (`--mqtt-status-topic`, its
-  own connection, client id `<id>-status`). `completed` reconciles that one Media file at once;
-  `failed` makes a Processing Media file **Failed** with the message's `error`. Other events are
-  ignored. Losing every hint only delays Ready until the next reconcile.
-- **Retry:** uploading to the same path again makes a Failed (or Ready) Media file Processing.
+- **Not in the catalogue:** uploads still transcoding or whose transcode failed. They show in the
+  transcoder's status messages and as inputs left in `ingest` (ADR 0006).
 - **Read API:** `GET /movies` lists the Movies that are not Hidden, with their Ready Media files:
   `[{"id", "name", "year", "media_files": [{"id", "label", "default", "manifests": {"hls", "dash"}}]}]`,
   the Media files ordered by Label. A matched Movie also has `tmdb_id`, `imdb_id`, `description`
@@ -72,10 +75,11 @@ The tracer bullet (a Movie upload becomes listable), then Shows, TMDB metadata a
   without a Rating: no Match, or no votes on TMDB yet. Seasons have none. A Season or Episode TMDB does not name is "Season 2" /
   "Specials" / "Episode 3". `image` falls back: a Season without a poster has its Show's, an
   Episode without a still its Season's (so, failing that, its Show's). Hidden applies at every level: an Episode needs a Ready Media file, a Season a listed
-  Episode, a Show a listed Season; a Hidden or unknown Show or Season answers 404. Processing,
-  Failed and Missing Media files are not listed.
-- **Unassigned media files:** an upload outside the layout is stored without a Movie or Episode,
-  goes through Processing and Ready (or Failed) like any other, and is never in the read API.
+  Episode, a Show a listed Season; a Hidden or unknown Show or Season answers 404. Missing Media
+  files are not listed; `default` is as described above (the oldest Ready one while the stored
+  default is Missing).
+- **Unassigned media files:** a finished upload outside the layout is stored without a Movie or
+  Episode, Ready or Missing like any other, and is never in the read API.
 - **TMDB for Movies and Shows** (the *matcher*): each new Movie or Show is looked up once,
   searching by its folder's name and year (`/search/movie`, `/search/tv` with the first-air year). Exactly one result with that year and the same name (ignoring case and punctuation)
   is a **Match**: name, year, imdbID, TMDB id, description and poster are filled in, except
@@ -103,11 +107,11 @@ The tracer bullet (a Movie upload becomes listable), then Shows, TMDB metadata a
   once, in its original size, to
   `assets/posters/<TMDB file name>`; `GET /images/<key>` streams it. Browsing never calls TMDB.
 - **Admin API** (under `/admin`, no authentication, localhost only):
-  `GET /admin/media-files/<id>` → `{"id", "key", "label", "state", "error"}` (`key`: the upload
-  key in `ingest`), for any state, 404 for an unknown id.
-  `GET /admin/media-files?state=failed,missing` → the same for every Media file in those states
-  (comma-separated; all states without `state`), by key: Failed ones with their `error`, Missing
-  ones with their `key`. 400 for an unknown state.
+  `GET /admin/media-files/<id>` → `{"id", "key", "label", "state"}` (`key`: the upload key its
+  marker records; `state`: `ready` or `missing`), 404 for an unknown id.
+  `GET /admin/media-files?state=missing` → the same for every Missing Media file, by key (every
+  Media file without `state`). 400 for any other `state`: Processing and Failed are not in the
+  catalogue.
   `PUT /admin/media-files/<id>/default` makes a Ready Media file the default of its Movie or Episode
   (204; 409 if it is not Ready or is Unassigned).
   `PATCH /admin/media-files/<id>` with `{"label"}` renames its Label (204; 409 if another Media file
@@ -115,7 +119,7 @@ The tracer bullet (a Movie upload becomes listable), then Shows, TMDB metadata a
   `DELETE /admin/media-files/<id>` removes it: `final/<id>/` is deleted through the storage port
   (`source.json` first, so a removal cut short never leaves a marker for the reconciler to place
   again), then its row. Its Movie or Episode stays, Hidden if nothing Ready is left, with its
-  metadata and Locked fields; a new upload brings it back.
+  metadata and Locked fields; a new upload brings it back once transcoded.
   `DELETE /admin/movies/<id>`, `/admin/shows/<id>`, `/admin/shows/<id>/seasons/<n>` and
   `/admin/shows/<id>/seasons/<n>/episodes/<n>` delete a **Hidden** entry for good, with what is below
   it, its metadata and its Media files (and their output in `final`); 409 if it is not Hidden. The
@@ -160,7 +164,8 @@ The tracer bullet (a Movie upload becomes listable), then Shows, TMDB metadata a
   sweep. See [Keeping Ratings current](#keeping-ratings-current).
 - **Database:** SQLite via Diesel, migrations in portable SQL run at startup. Tables so far: `movie`
   (with `folder_name`/`folder_year`, the placement identity, apart from the displayed `name`/`year`)
-  and `media_file`; `show` (same folder identity), `season`, `episode`, and `media_file.episode_id`
+  and `media_file` (`state` is `ready` or `missing`; a migration removed Processing and Failed
+  rows and the `error` column); `show` (same folder identity), `season`, `episode`, and `media_file.episode_id`
   (a `CHECK` keeps a Media file from having both a `movie_id` and an `episode_id`);
   `movie_metadata` (match state, retry backoff, TMDB fields, `locked_fields` as a JSON array of field
   names; no row = not looked up yet) and `movie_candidate`; `show_metadata` and `show_candidate`
@@ -205,66 +210,63 @@ Nothing that is uploaded is rejected: what does not fit waits for an admin inste
 
 ```mermaid
 flowchart TB
-    Up(["upload to ingest<br/>movies/The Matrix (1999)/matrix.mkv"]) -.->|ObjectCreated| Topic{{"dodoglass/ingest"}}
-    Topic -->|"$share/transcoders"| T[Transcoder]
-    Topic -->|"$share/assets"| Id
+    Up(["upload to ingest<br/>movies/The Matrix (1999)/matrix.mkv"]) -.->|ObjectCreated| Ingest{{"dodoglass/ingest"}}
+    Ingest -->|"$share/transcoders"| T[Transcoder]
+    T -->|"1. output in final/&lt;id&gt;/<br/>2. final/&lt;id&gt;/source.json last"| Final[("bucket final")]
+    Final -.->|"ObjectCreated *source.json<br/>(ADR 0006)"| FinalTopic{{"dodoglass/final"}}
+    FinalTopic -->|"$share/assets"| Listener
 
     subgraph AS["Asset server"]
-        Id["task id from key<br/>(shared crate, ADR 0004)"] --> Parse{"path fits the<br/>upload layout?"}
-        Parse -->|yes| Place["find or create Movie<br/>or Show → Season → Episode<br/>Media file: Processing, Label from file name"]
+        Listener["marker listener:<br/>read final/&lt;id&gt;/source.json"] --> Check
+        Rec["reconcile final/*/source.json<br/>at startup + periodically<br/>(safety net, ADR 0001)"] --> Check
+        Check{"Media file<br/>known?"}
+        Check -->|no| Parse{"input.key fits the<br/>upload layout?<br/>(task id from key, ADR 0004)"}
+        Parse -->|yes| Place["find or create Movie<br/>or Show → Season → Episode<br/>Label from file name"]
         Parse -->|no| Unassigned["Unassigned media file"]
-        Rec["reconcile final/*/source.json<br/>at startup + periodically (ADR 0001)"]
-        Hint["status hint:<br/>completed / failed"]
-        Ready["Ready"]
-        Failed["Failed"]
-        Missing["Missing"]
+        Check -->|"yes, marker there"| Ready["Ready"]
+        Check -->|"yes, marker gone"| Missing["Missing"]
+        Place & Unassigned --> Ready
     end
 
-    T -->|"final/&lt;id&gt;/ + source.json"| Final[("bucket final")]
-    T -.->|dodoglass/status| Hint
-    Hint -->|completed| Rec
     Final --> Rec
-    Rec --> Ready & Missing
-    Hint -->|failed| Failed
-    Place & Unassigned & Ready & Failed & Missing --> DB[("SQLite")]
+    Ready & Missing --> DB[("SQLite")]
 ```
 
-1. The asset server subscribes to the ingest events as its own group, so it and the transcoders each
-   get every upload. From the key it computes the **same task id** as the transcoder, with the function
-   from a crate both depend on.
-2. It places the Media file in the catalogue from the path (or makes it an Unassigned media file),
-   state **Processing**.
-3. A Media file is **Ready** only when `final/<id>/source.json` exists. Status messages are
-   best-effort (`try_publish`) and missed while the asset server is down, so they only trigger an early
-   check; the reconcile at startup and every few minutes is what counts. `source.json` records the
-   input as `{bucket, key}`, so the reconcile can also place Media files it never saw an event for.
+1. The transcoder writes `source.json` last, once the output is complete (ADR 0001). RustFS
+   publishes that object's event on `dodoglass/final`, which only the asset server subscribes to
+   (as its own shared-subscription group), so output never triggers a transcode.
+2. The asset server reads the marker from `final`: `source.json` records the input as `{bucket,
+   key}`, and the key places the Media file (or makes it an Unassigned media file), **Ready** at
+   once. The id is the **same task id** the transcoder uses, from a crate both depend on.
+3. Events can be lost (the asset server was down, the broker restarted). The reconcile at startup
+   and every few minutes finds what they missed, and notices markers that are gone (**Missing**).
+4. What is still transcoding or has failed is not in the catalogue: it shows in the transcoder's
+   status messages and as inputs left in `ingest`.
 
 ### Media file states
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Processing: upload event
-    [*] --> Ready: reconcile finds source.json for an unknown key
-    Processing --> Ready: source.json found
-    Processing --> Failed: failed status, or > 24 h with input still in ingest
-    Failed --> Processing: upload to the same path again
-    Failed --> Ready: source.json found
-    Ready --> Processing: upload to the same path again (new version)
-    Ready --> Missing: output gone from final
-    Missing --> Ready: output back
+    [*] --> Ready: new source.json (event or reconcile)
+    Ready --> Missing: source.json gone (output deleted, or a re-upload is transcoding)
+    Missing --> Ready: source.json back
     Ready --> [*]: admin removes it
-    Failed --> [*]: admin removes it
     Missing --> [*]: admin removes it
 ```
 
-- Uploading to the **same path** again is a new version of the same Media file: its Movie or Episode,
-  Label and Locked fields stay.
+- The catalogue only learns of a Media file once its transcode is complete (ADR 0006), so there is
+  no Processing or Failed state and no time limit.
+- Uploading to the **same path** again is a new version of the same Media file: the transcoder
+  deletes the old marker first, so it is Missing until the new one is written. Its Movie or
+  Episode, Label and Locked fields stay, and so does its place as the Default media file.
 - Only an admin removes a Media file; the asset server then deletes `final/<id>/` and the row. Output
   that disappears for any other reason makes it **Missing**, never deleted.
 - A Movie or Episode without a Ready Media file is **Hidden**, not deleted, so a re-upload comes back
   with its fixes. Shows and Seasons are hidden when none of their Episodes are visible.
-- One Media file per Movie or Episode is the **Default media file**. When it is removed or becomes
-  Missing or Failed, the oldest remaining Ready one takes over.
+- One Media file per Movie or Episode is the **Default media file**. The stored default only moves
+  when it is **removed**: the oldest remaining Ready one takes over (or the oldest remaining one).
+  While it is Missing, the read API marks the oldest Ready one as default without storing that;
+  once it is Ready again, it is the default again.
 - **Labels** are unique per Movie or Episode: `matrix.mkv` and `matrix.mp4` become "matrix" and
   "matrix (mp4)". An admin can rename them.
 
@@ -395,10 +397,9 @@ erDiagram
         int episode_id FK "null if unassigned"
         string label "unique per Movie or Episode"
         bool is_default "one per Movie or Episode"
-        string state "processing, ready, failed, missing"
+        string state "ready, missing"
         string hls_manifest
         string dash_manifest
-        text error
     }
 ```
 
@@ -415,14 +416,16 @@ stay within SQL that SQLite and Postgres both accept (ADR 0002).
   from the folder, so a movie can be watched before its metadata is fixed.
 - Movies, Shows and Episodes carry their Rating: `rating` (number or `null`), `votes` (integer or
   `null`) and `rating_updated_at` (timestamp or `null`).
-- Per Media file: its Label, whether it is the default, and the **manifest keys**
+- Per Media file (Ready ones only): its Label, whether it is the default (the stored default, or
+  the oldest Ready one while that is Missing), and the **manifest keys**
   (`final/<id>/hls/master.m3u8`, `final/<id>/dash/manifest.mpd`). Delivering the streams is the
   Playback service's job.
 - `GET /images/<key>` streams an image from `assets`.
 
-**Admin API** under `/admin/...`: list Needs review and Unassigned media files, pick a Match, edit
-fields (which locks them; the Rating cannot be edited or locked), attach an Unassigned media file,
-set the Default media file, rename a Label, remove a Media file, refresh.
+**Admin API** under `/admin/...`: list Needs review and Unassigned media files, list Missing Media
+files (`?state=missing`, the only state filter), pick a Match, edit fields (which locks them; the
+Rating cannot be edited or locked), attach an Unassigned media file, set the Default media file,
+rename a Label, remove a Media file (which hands the default over for good), refresh.
 
 ## Changes outside the asset server
 
@@ -430,7 +433,7 @@ set the Default media file, rename a Label, remove a Media file, refresh.
 |---|---|
 | Transcoder | task id = readable prefix + 8 hex of SHA-256 over the NFC-normalised key (ADR 0004), moved into a shared crate |
 | Transcoder | `source.json` stores `input` as `{"bucket": …, "key": …}`; its schema (`OutputMarker`) moved into the shared crate, so both read and write the same type |
-| `infra/init.sh` | creates the bucket `assets` |
+| `infra/init.sh` | creates the bucket `assets`; sets the event rule on `final` (`source.json` → `dodoglass/final`, ADR 0006) |
 | `final` bucket | existing outputs deleted and re-uploaded (new ids, no migration) |
 
 ## Open points

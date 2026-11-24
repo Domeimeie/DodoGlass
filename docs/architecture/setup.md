@@ -43,7 +43,7 @@ go-task infra:up
 ```
 
 This starts RustFS and Mosquitto in the background, then runs the one-shot `init` container, which
-creates the buckets and the event rule. The first start downloads the images. Expected output at the
+creates the buckets and the event rules. The first start downloads the images. Expected output at the
 end:
 
 ```
@@ -54,10 +54,13 @@ bucket assets: created
 folder ingest/movies/: created
 folder ingest/shows/: created
 event rule on ingest: set (.mp4 .mov .mkv -> MQTT topic dodoglass/ingest)
+event rule on final: set (source.json -> MQTT topic dodoglass/final)
 init-1 exited with code 0
 ```
 
-On later starts it says `exists` instead of `created`.
+On later starts it says `exists` instead of `created`; the event rules are set again, which
+changes nothing. If `compose.yml` changed (e.g. a new event target), `infra:up` recreates the
+containers first; bucket contents are kept.
 
 ## 4. Check that it works
 
@@ -94,7 +97,8 @@ go-task transcoder:serve-s3 -- -t 2
 It connects to Mosquitto and RustFS (`localhost`, development credentials from `Taskfile.yml`),
 registers and waits. Upload a video to `ingest`: the log shows `task accepted`, progress, `uploaded`,
 `job done` for HLS and DASH and `task completed`; the first terminal shows the status messages on
-`dodoglass/status`. The result:
+`dodoglass/status`, and, once the output is complete, one message on `dodoglass/final` for its
+`source.json` (the asset server's cue, step 7). The result:
 
 ```bash
 go-task infra:ls -- final        # sample-de8f39c7/hls/…, …/dash/…, …/source.json
@@ -173,15 +177,18 @@ Open in a browser or with `curl -s … | python3 -m json.tool`. There is no page
 | `/images/<image>` | a poster or still; `<image>` is the `image` field, e.g. `posters/….jpg` |
 | `/admin/needs-review` | Movies and Shows without a certain Match, with candidates |
 | `/admin/unassigned-media-files` | uploads that did not fit the layout, with the reason |
-| `/admin/media-files?state=failed,missing` | failed transcodes and vanished outputs |
+| `/admin/media-files?state=missing` | Media files whose output vanished from `final` (or is being replaced by a re-upload) |
 
 The **Rating** is in `rating` (TMDB's score, 0–10), `votes` and `rating_updated_at` (when it was
 fetched) of each Movie, Show and Episode; all three are `null` until the entry has a Match. It is
 fetched with the Match and kept current by a sweep every hour, which fetches Ratings older than 7
 days again (`--rating-sweep-interval`, `--rating-max-age`).
 
-A video shows up once its transcode is complete (the transcoder's `completed` message, at the latest
-at the next reconcile, every 300 s). Correcting matches, editing fields and attaching files: see the
+A video shows up as soon as its transcode is complete: the transcoder writes `source.json` last,
+RustFS announces it on `dodoglass/final`, and the asset server places it at once (if that message is
+lost, the next reconcile finds it, every 300 s). Uploads still transcoding or whose transcode failed
+are not in the catalogue: watch `dodoglass/status`, or `go-task infra:ls -- ingest` (a failed one
+keeps its input there). Correcting matches, editing fields and attaching files: see the
 asset server's `README.md` and [Asset server](asset-server.md). The database is a plain SQLite file;
 `go-task asset-server:clean` deletes it and the build, for a fresh catalogue.
 
@@ -191,7 +198,7 @@ All from the repository root:
 
 | Command | What it does |
 |---|---|
-| `go-task infra:up` | Start everything, set up buckets and the event rule |
+| `go-task infra:up` | Start everything, set up buckets and the event rules |
 | `go-task infra:down` | Stop everything; bucket contents are kept |
 | `go-task infra:reset` | Stop and **delete all bucket contents**, then start fresh (asks first) |
 | `go-task infra:watch` | Print every MQTT message |
@@ -212,7 +219,8 @@ All from the repository root:
 | `port is already allocated` for 1883 | A native Mosquitto is running: stop it (Ctrl+C, or `sudo systemctl stop mosquitto`) |
 | Mosquitto: `Error opening config file` / permission denied | SELinux; the `:Z` on the volume in `compose.yml` must be there |
 | `init` ends with `RustFS did not answer within 60 s` | RustFS failed to start: `go-task infra:logs` and look for errors |
-| Upload works, but no MQTT message | Check the file ends in lowercase `.mp4`, `.mov` or `.mkv` (case-sensitive). Check the RustFS log for `mqtt` errors. Run `go-task infra:up` again to reset the rule |
+| Upload works, but no MQTT message | Check the file ends in lowercase `.mp4`, `.mov` or `.mkv` (case-sensitive). Check the RustFS log for `mqtt` errors. Run `go-task infra:up` again to reset the rules |
+| Transcode completes, but nothing on `dodoglass/final` | `go-task infra:up` from this version, so RustFS has the `final` target and `final` its rule (`init` prints `event rule on final: set`). The asset server still places the video at its next reconcile |
 | ffmpeg: `Unknown encoder 'libx264'` | `ffmpeg-free` is installed instead of RPM Fusion's ffmpeg, see step 1 |
 | `cargo fmt` / `cargo clippy`: `no such command` | `sudo dnf install rustfmt clippy` |
 | Transcoder: `cannot connect to the MQTT broker` / `cannot access bucket final` | Infrastructure not running: `go-task infra:up` |
@@ -222,4 +230,5 @@ All from the repository root:
 | `http://127.0.0.1:8090` shows nothing / 404 | There is no page at `/`; open `/movies` or `/shows` |
 | A Movie or Show has no description or poster | No `ASSETS_TMDB_API_KEY` (see step 6), or it is in `/admin/needs-review`: name or year differ from TMDB's |
 | `rating` is `null` | No Match yet (as above), or nobody has voted on TMDB yet |
-| A video does not appear at all | Its transcode is not complete yet (`/admin/media-files/<id>`), or its path did not fit: `/admin/unassigned-media-files` |
+| A video does not appear at all | Its transcode is not complete yet or failed (transcoder log, `dodoglass/status`; a failed input stays in `ingest`), or its path did not fit: `/admin/unassigned-media-files` |
+| A video disappeared after uploading it again | It is being transcoded again: the old output's marker is deleted first, so it is Missing until the new one is done. Its Label stays; another Ready version is shown as default meanwhile |

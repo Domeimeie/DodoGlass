@@ -12,7 +12,7 @@ Setting it up on a new machine: see [Setup](setup.md). Files: `infra/` in the re
 |---|---|---|---|
 | Object storage | [RustFS](https://github.com/rustfs/rustfs) 1.0.4 | Stores the videos in buckets; S3-compatible API. Plays the **Media storage** of the [system architecture](architecture.md) | `9000` S3 API, `9001` web console |
 | MQTT broker | [Eclipse Mosquitto](https://mosquitto.org) 2.1.2 | Passes messages from publishers to subscribers by topic | `1883` |
-| Setup job | AWS CLI 2.39.5 | Runs once on start: creates the buckets and the event rule, then exits. Also used by `go-task infra:upload` / `infra:ls` | – |
+| Setup job | AWS CLI 2.39.5 | Runs once on start: creates the buckets and the event rules, then exits. Also used by `go-task infra:upload` / `infra:ls` | – |
 | Transcoder | ours, native | Subscribes to new-video events, transcodes, writes the result back | – |
 
 ### Terms
@@ -38,14 +38,16 @@ flowchart LR
         Assets[("bucket<br/>assets")]
     end
     Ingest -.->|"event: ObjectCreated<br/>only .mp4 .mov .mkv"| Broker
+    Final -.->|"event: ObjectCreated<br/>only source.json"| FinalTopic
     subgraph Mosquitto["Mosquitto (Docker)"]
         Broker{{"topic<br/>dodoglass/ingest"}}
+        FinalTopic{{"topic<br/>dodoglass/final"}}
     end
     Broker -->|"$share/transcoders"| T[Transcoder<br/>native]
-    Broker -->|"$share/assets"| A[Asset server<br/>native]
+    FinalTopic -->|"$share/assets"| A[Asset server<br/>native]
     Ingest -->|reads the video| T
-    T -->|HLS + DASH| Final
-    Final -->|output markers| A
+    T -->|"HLS + DASH,<br/>source.json last"| Final
+    Final -->|"reads output markers<br/>(event + reconcile)"| A
     A ---|images| Assets
 ```
 
@@ -55,14 +57,20 @@ flowchart LR
 3. The transcoder, subscribed to that topic, receives the event, reads the video from `ingest`,
    transcodes it and writes the result to `final`.
 
-`final` deliberately has no event rule: otherwise the transcoder's own output would trigger new jobs.
+4. Once the output is complete, the transcoder writes `final/<id>/source.json` last. RustFS
+   publishes that object's event to `dodoglass/final` (and no other object's in `final`).
+5. The [asset server](asset-server.md), subscribed to `dodoglass/final` as its own
+   shared-subscription group (`assets`), reads the marker and places the Media file in the
+   catalogue as Ready (ADR 0006). A periodic reconcile of `final` catches events that were lost.
+   The bucket `assets` holds the images it stores.
 
-The [asset server](asset-server.md) subscribes to the same topic as its own shared-subscription
-group (`assets`), so it and the transcoders each get every upload. It places the upload in the
-catalogue and marks it Ready once the transcoder's output marker is in `final`. The bucket
-`assets` holds the images it stores.
+**Why `final` has an event rule now.** It used to have none, so that the transcoder's own output
+would not trigger new transcodes. That cannot happen with the rule on its own topic: the transcoders
+subscribe only to `dodoglass/ingest`, and only the asset server listens to `dodoglass/final`. The
+rule matches only `source.json`, so the many segment files of an output produce no messages, and
+the catalogue only learns of finished output.
 
-All three steps are built and tested. How the transcoder does step 3 without storing the video on
+All five steps are built and tested. How the transcoder does step 3 without storing the video on
 its own disk: [Transcoder](transcoder.md#inputs-and-outputs-in-buckets) and [Efficiency](efficiency.md).
 
 ## Networking
@@ -104,7 +112,10 @@ allow_anonymous true
 Without a config file, Mosquitto 2.x only accepts connections from its own container. These lines
 open it to the other containers and the host, without login. **Development only.**
 
-### RustFS event target (environment variables)
+### RustFS event targets (environment variables)
+
+An MQTT target has one topic, so each topic is a target of its own: `primary` for
+`dodoglass/ingest`, `final` for `dodoglass/final`.
 
 | Variable | Value | Meaning |
 |---|---|---|
@@ -113,9 +124,12 @@ open it to the other containers and the host, without login. **Development only.
 | `RUSTFS_NOTIFY_MQTT_BROKER_PRIMARY` | `mqtt://mosquitto:1883` | The broker, by its Compose service name |
 | `RUSTFS_NOTIFY_MQTT_TOPIC_PRIMARY` | `dodoglass/ingest` | Topic the events are published to |
 | `RUSTFS_NOTIFY_MQTT_QOS_PRIMARY` | `1` | *At least once*: the broker acknowledges each message. With QoS 0 an event can be lost silently |
+| `RUSTFS_NOTIFY_MQTT_ENABLE_FINAL` … `_QOS_FINAL` | `on`, `mqtt://mosquitto:1883`, `dodoglass/final`, `1` | The same for the target `final` |
 
-The target's ID, needed by the event rule, is the ARN `arn:rustfs:sqs:us-east-1:primary:mqtt`
-(format `arn:rustfs:sqs:<region>:<target name>:<type>`). The RustFS docs only name two of the MQTT
+A target's ID, needed by an event rule, is its ARN: `arn:rustfs:sqs:us-east-1:primary:mqtt` and
+`arn:rustfs:sqs:us-east-1:final:mqtt` (format `arn:rustfs:sqs:<region>:<target name>:<type>`).
+Changing these variables recreates the `rustfs` container on the next `go-task infra:up`; the
+bucket contents stay in the volume. The RustFS docs only name two of the MQTT
 variables; the full list is in the RustFS source, `crates/config/src/notify/mqtt.rs`.
 
 ### Event rule: `infra/ingest-notification.json`
@@ -135,9 +149,25 @@ filter:
 Suffix matching is **case-sensitive**: `MOVIE.MKV` does not trigger an event. The transcoder should
 check the file type itself as well.
 
+### Event rule: `infra/final-notification.json`
+
+One rule on the bucket `final`, for the output markers only, to the target `final`:
+
+```json
+{
+  "Id": "final-marker",
+  "QueueArn": "arn:rustfs:sqs:us-east-1:final:mqtt",
+  "Events": ["s3:ObjectCreated:*"],
+  "Filter": { "Key": { "FilterRules": [{ "Name": "suffix", "Value": "source.json" }] } }
+}
+```
+
+The key in the event is form-encoded including the slash (`abc-1%2Fsource.json`); the asset server
+decodes it like the transcoder does. It ignores any key that is not `<id>/source.json`.
+
 ### Setup as code: `infra/init.sh`
 
-The buckets and the event rule live inside RustFS's data volume, not in git. Clicking them together
+The buckets and the event rules live inside RustFS's data volume, not in git. Clicking them together
 in the web console works once, but cannot be reviewed or repeated on another machine. `init.sh` does
 it on every `docker compose up` instead:
 
@@ -145,8 +175,9 @@ it on every `docker compose up` instead:
 2. create `ingest`, `final` and `assets` unless they exist,
    and the empty folders `movies/` and `shows/` in `ingest` (marker objects: S3 has no real folders,
    so without them a folder vanishes once its last upload is consumed; not videos, so no event),
-3. set the event rule from `ingest-notification.json`. This *replaces* the bucket's whole
-   notification config, so the file is the single source of truth.
+3. set the event rule of `ingest` from `ingest-notification.json` and that of `final` from
+   `final-notification.json`. Each call *replaces* the bucket's whole notification config, so the
+   files are the single source of truth.
 
 It is **idempotent**: running it again changes nothing. Tested on an existing setup and on an empty
 RustFS volume.
@@ -206,4 +237,5 @@ Findings:
   anonymous clients. Fine on a developer machine; a real deployment would use secrets from the
   environment and a broker with login and TLS.
 - **Lost events.** If the broker is down when a video is uploaded, the event can be lost. RustFS can
-  buffer events on disk (`RUSTFS_NOTIFY_MQTT_QUEUE_DIR_PRIMARY`); not configured yet.
+  buffer events on disk (`RUSTFS_NOTIFY_MQTT_QUEUE_DIR_PRIMARY`, `..._FINAL`); not configured yet.
+  A lost `dodoglass/final` event only delays a Media file until the asset server's next reconcile.

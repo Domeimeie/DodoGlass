@@ -42,8 +42,9 @@ flowchart TB
     API -->|play| PlaybackService
     UserService --> UserDB
     Ingest -.->|upload events| Broker
+    Final -.->|output marker events| Broker
     Broker -->|tasks| Transcoder
-    Broker -->|uploads, status| AssetServer
+    Broker -->|finished outputs| AssetServer
     Transcoder -->|read| Ingest
     Transcoder -->|HLS + DASH| Final
     Transcoder -.->|status| Broker
@@ -65,6 +66,7 @@ flowchart TB
 Green parts are built; the rest is planned. The **Asset server** combines the planned Library and
 Metadata services (see [Asset server](asset-server.md)).
 
-**Media storage** is S3-compatible object storage (RustFS); new uploads reach the Transcoder and the
-Asset server as events over an MQTT broker (Mosquitto). See [Infrastructure](infrastructure.md), and
+**Media storage** is S3-compatible object storage (RustFS); new uploads reach the Transcoder, and
+finished outputs (their `source.json` in `final`) the Asset server, as events over an MQTT broker
+(Mosquitto). See [Infrastructure](infrastructure.md), and
 [Setup](setup.md) for a development environment.

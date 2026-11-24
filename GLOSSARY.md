@@ -36,7 +36,9 @@ name (e.g. "matrix-directors-cut").
 _Avoid_: Edition, version
 
 **Default media file**:
-The Media file of a Movie or Episode that plays unless the viewer picks another one.
+The Media file of a Movie or Episode that plays unless the viewer picks another one. It only moves
+when an admin picks another or removes it; while it is Missing, the oldest Ready Media file plays
+instead.
 _Avoid_: Main file, primary
 
 **Unassigned media file**:
@@ -62,20 +64,18 @@ A descriptive field an admin has edited by hand; it is never overwritten by a ne
 
 ### Media file states
 
-**Processing**:
-A Media file that has been uploaded and whose transcoded output is not complete yet.
-_Avoid_: Pending, transcoding
+The catalogue only learns of a Media file once its transcode is complete (ADR 0006), so these are
+the only two states. An upload still being transcoded, or whose transcode failed, is not a Media file
+yet.
 
 **Ready**:
 A Media file whose transcoded output is complete and can be played.
-_Avoid_: Done, finished, available
-
-**Failed**:
-A Media file whose transcode did not complete; uploading to the same path again retries it.
+_Avoid_: Done, finished, available, processing
 
 **Missing**:
-A Media file the catalogue knows as Ready whose transcoded output has disappeared from storage.
-_Avoid_: Deleted, removed
+A Media file the catalogue knows whose transcoded output is gone from storage or incomplete: deleted,
+or being replaced by a re-upload to the same path.
+_Avoid_: Deleted, removed, failed
 
 ### Visibility
 
