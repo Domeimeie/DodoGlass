@@ -4,7 +4,10 @@
 
 mod common;
 
+use std::time::Duration;
+
 use asset_server::ports::tmdb::{MovieDetails, ShowDetails};
+use axum::http::StatusCode;
 use common::TestApp;
 use common::tmdb::{episode, movie, rated, season, show};
 use serde_json::{Value, json};
@@ -177,4 +180,120 @@ async fn seasons_have_no_rating() {
     let id = &only_show(&app).await["id"];
     let season = &app.get_json(&format!("/shows/{id}/seasons")).await[0];
     assert!(season.get("rating").is_none(), "{season}");
+}
+
+#[tokio::test]
+async fn a_refresh_updates_the_rating_of_a_movie_with_locked_fields() {
+    let app = TestApp::start().await;
+    app.tmdb.add_movie(MovieDetails {
+        rating: rated(8.2, 26_000),
+        ..movie(603, "The Matrix", 1999)
+    });
+    ready(&app, MATRIX).await;
+    let id = only_movie(&app).await["id"].clone();
+    let (status, body) = app
+        .send_json(
+            "PATCH",
+            &format!("/admin/movies/{id}"),
+            json!({ "description": "Mine." }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    app.tmdb.add_movie(MovieDetails {
+        rating: rated(8.3, 27_000),
+        overview: Some("TMDB's new text.".into()),
+        ..movie(603, "The Matrix", 1999)
+    });
+    app.advance(Duration::from_secs(60));
+
+    let (status, body) = app
+        .send_json("POST", &format!("/admin/movies/{id}/refresh"), json!({}))
+        .await;
+
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let listed = only_movie(&app).await;
+    assert_eq!(listed["rating"], json!(8.3));
+    assert_eq!(listed["votes"], json!(27_000));
+    assert_eq!(listed["rating_updated_at"], json!("2026-11-17T00:01:00Z"));
+    assert_eq!(listed["description"], json!("Mine."));
+}
+
+#[tokio::test]
+async fn a_refresh_updates_the_ratings_of_a_show_and_episodes_with_locked_fields() {
+    let app = TestApp::start().await;
+    add_breaking_bad(&app);
+    ready_breaking_bad(&app).await;
+    let id = only_show(&app).await["id"].clone();
+    for (uri, field) in [
+        (format!("/admin/shows/{id}"), "description"),
+        (format!("/admin/shows/{id}/seasons/1/episodes/1"), "name"),
+    ] {
+        let (status, body) = app
+            .send_json("PATCH", &uri, json!({ field: "Mine." }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    app.tmdb.add_show(ShowDetails {
+        rating: rated(9.0, 16_000),
+        ..show(1396, "Breaking Bad", 2008)
+    });
+    app.tmdb.rate_episode(1396, 1, 1, rated(8.0, 200));
+
+    let (status, body) = app
+        .send_json("POST", &format!("/admin/shows/{id}/refresh"), json!({}))
+        .await;
+
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let listed = only_show(&app).await;
+    assert_eq!(listed["rating"], json!(9.0));
+    assert_eq!(listed["description"], json!("Mine."));
+    let pilot = &season_1(&app).await[0];
+    assert_eq!(
+        (&pilot["rating"], &pilot["votes"]),
+        (&json!(8.0), &json!(200))
+    );
+    assert_eq!(pilot["name"], json!("Mine."));
+}
+
+#[tokio::test]
+async fn the_rating_cannot_be_edited_or_locked() {
+    let app = TestApp::start().await;
+    app.tmdb.add_movie(MovieDetails {
+        rating: rated(8.2, 26_000),
+        ..movie(603, "The Matrix", 1999)
+    });
+    add_breaking_bad(&app);
+    ready(&app, MATRIX).await;
+    ready_breaking_bad(&app).await;
+    let movie = only_movie(&app).await["id"].clone();
+    let show = only_show(&app).await["id"].clone();
+    let entries = [
+        format!("/admin/movies/{movie}"),
+        format!("/admin/shows/{show}"),
+        format!("/admin/shows/{show}/seasons/1/episodes/1"),
+    ];
+
+    for entry in &entries {
+        for edit in [
+            json!({ "rating": 1.0 }),
+            json!({ "votes": 1 }),
+            json!({ "rating_updated_at": null }),
+            json!({ "description": "Mine.", "rating": 1.0 }),
+        ] {
+            let (status, body) = app.send_json("PATCH", entry, edit.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{entry} {edit}: {body}");
+            let message = body.to_string();
+            assert!(message.contains("never locked"), "{entry} {edit}: {body}");
+        }
+        let (status, body) = app
+            .send_json("DELETE", &format!("{entry}/locks/rating"), json!({}))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{entry}: {body}");
+    }
+
+    let listed = only_movie(&app).await;
+    assert_eq!(listed["rating"], json!(8.2));
+    assert_eq!(listed["description"], json!("About The Matrix."));
+    assert_eq!(only_show(&app).await["rating"], json!(8.9));
+    assert_eq!(season_1(&app).await[0]["rating"], json!(7.9));
 }
