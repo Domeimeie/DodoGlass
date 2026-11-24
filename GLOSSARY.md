@@ -52,6 +52,11 @@ The state of a catalogue entry for which no Match could be made with certainty, 
 pick one.
 _Avoid_: Unmatched, pending
 
+**Rating**:
+TMDB's user score of a Movie, Show or Episode (0–10) with its number of votes. Never a Locked field:
+it is refreshed periodically, while all other descriptive information is fetched once.
+_Avoid_: Score, vote, age rating (an age rating is a certification, not a Rating)
+
 **Locked field**:
 A descriptive field an admin has edited by hand; it is never overwritten by a new Match or a refresh.
 
