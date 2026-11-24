@@ -13,8 +13,10 @@ use diesel::prelude::*;
 use serde::Serialize;
 
 use super::match_state::MatchState;
+use super::ratings::{self, RatingView};
 use super::schema::{movie, movie_candidate, movie_metadata};
 use super::{Catalogue, MovieView};
+use crate::ports::tmdb::Rating;
 
 /// The descriptive fields an admin can lock (as stored in `locked_fields`).
 pub const LOCKABLE_FIELDS: [&str; 5] = ["name", "year", "imdb_id", "description", "image"];
@@ -73,6 +75,8 @@ pub struct MovieMatch {
     pub description: Option<String>,
     /// Key of the downloaded poster in `assets`.
     pub image_key: Option<String>,
+    /// Never locked: always written.
+    pub rating: Option<Rating>,
 }
 
 /// One of the TMDB results kept for an entry in Needs review.
@@ -101,6 +105,8 @@ pub struct MovieMetadataView {
     /// Key of the poster, served at `GET /images/<key>`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    #[serde(flatten)]
+    pub rating: RatingView,
 }
 
 /// A Movie in Needs review, as the admin API lists it.
@@ -120,6 +126,9 @@ struct MetadataRow {
     imdb_id: Option<String>,
     description: Option<String>,
     image_key: Option<String>,
+    rating: Option<f64>,
+    votes: Option<i64>,
+    rating_updated_ms: Option<i64>,
 }
 
 /// Fills the metadata part of `movies` (keyed by Movie id): what a Match
@@ -140,6 +149,7 @@ pub(super) fn fill_views(
                 imdb_id: row.imdb_id,
                 description: row.description,
                 image: row.image_key,
+                rating: RatingView::from_columns(row.rating, row.votes, row.rating_updated_ms),
             };
         }
     }
@@ -155,11 +165,13 @@ fn locked_fields(conn: &mut SqliteConnection, movie_id: i32) -> Result<LockedFie
     Ok(json.map(|j| LockedFields::parse(&j)).unwrap_or_default())
 }
 
-/// [`Catalogue::movie_matched`], inside a transaction of the caller's.
+/// [`Catalogue::movie_matched`] at `now_ms`, inside a transaction of the
+/// caller's.
 pub(super) fn apply_movie_match(
     conn: &mut SqliteConnection,
     movie_id: i32,
     found: MovieMatch,
+    now_ms: i64,
 ) -> Result<()> {
     let locks = locked_fields(conn, movie_id)?;
     let current: Option<MetadataRow> = movie_metadata::table
@@ -167,6 +179,7 @@ pub(super) fn apply_movie_match(
         .select(MetadataRow::as_select())
         .first(conn)
         .optional()?;
+    let (rating, votes) = ratings::columns(found.rating);
     let keep = |field: &str, new: Option<String>, old: Option<String>| {
         if locks.contains(field) { old } else { new }
     };
@@ -196,6 +209,9 @@ pub(super) fn apply_movie_match(
         movie_metadata::imdb_id.eq(imdb_id),
         movie_metadata::description.eq(description),
         movie_metadata::image_key.eq(image_key),
+        movie_metadata::rating.eq(rating),
+        movie_metadata::votes.eq(votes),
+        movie_metadata::rating_updated_ms.eq(Some(now_ms)),
     );
     diesel::insert_into(movie_metadata::table)
         .values((movie_metadata::movie_id.eq(movie_id), values.clone()))
@@ -246,8 +262,9 @@ impl Catalogue {
 
     /// The Movie has a Match: every field that is not locked is filled in.
     pub async fn movie_matched(&self, movie_id: i32, found: MovieMatch) -> Result<()> {
+        let now = self.clock.now_ms();
         self.db
-            .run(move |conn| conn.transaction(|conn| apply_movie_match(conn, movie_id, found)))
+            .run(move |conn| conn.transaction(|conn| apply_movie_match(conn, movie_id, found, now)))
             .await
     }
 

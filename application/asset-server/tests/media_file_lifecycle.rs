@@ -264,6 +264,9 @@ async fn an_output_marker_with_no_known_media_file_is_placed_as_ready() {
             "id": 1,
             "name": "The Matrix",
             "year": 1999,
+            "rating": null,
+            "votes": null,
+            "rating_updated_at": null,
             "media_files": [{
                 "id": MATRIX_ID,
                 "label": "matrix",

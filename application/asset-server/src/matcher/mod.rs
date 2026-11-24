@@ -180,6 +180,7 @@ impl Matcher {
             imdb_id: details.imdb_id,
             description: details.overview,
             image_key,
+            rating: details.rating,
         })
     }
 

@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use asset_server::ports::tmdb::{
-    EpisodeDetails, MovieDetails, MovieSummary, SeasonDetails, ShowDetails, ShowSummary, Tmdb,
-    TmdbError,
+    EpisodeDetails, MovieDetails, MovieSummary, Rating, SeasonDetails, ShowDetails, ShowSummary,
+    Tmdb, TmdbError,
 };
 use async_trait::async_trait;
 
@@ -39,7 +39,13 @@ pub fn movie(tmdb_id: i64, title: &str, year: i32) -> MovieDetails {
         imdb_id: Some(format!("tt{tmdb_id:07}")),
         overview: Some(format!("About {title}.")),
         poster_path: None,
+        rating: None,
     }
+}
+
+/// A Rating: TMDB's score with its number of votes.
+pub fn rated(score: f64, votes: i64) -> Option<Rating> {
+    Some(Rating { score, votes })
 }
 
 /// A Show TMDB knows, first aired in `year`, without a poster.

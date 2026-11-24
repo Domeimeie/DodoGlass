@@ -27,6 +27,28 @@ pub struct MovieSummary {
     pub poster_path: Option<String>,
 }
 
+/// TMDB's user score of a Movie, Show or Episode: the Rating.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rating {
+    /// `vote_average`, 0–10.
+    pub score: f64,
+    /// `vote_count`, at least 1: without a vote there is no Rating.
+    pub votes: i64,
+}
+
+impl Rating {
+    /// TMDB's `vote_average` and `vote_count`; `None` without votes (TMDB
+    /// then sends a score of 0).
+    pub fn from_votes(average: Option<f64>, count: Option<i64>) -> Option<Rating> {
+        match (average, count) {
+            (Some(score), Some(votes)) if votes > 0 && score.is_finite() => {
+                Some(Rating { score, votes })
+            }
+            _ => None,
+        }
+    }
+}
+
 /// A Movie with everything the catalogue takes from TMDB.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MovieDetails {
@@ -36,6 +58,7 @@ pub struct MovieDetails {
     pub imdb_id: Option<String>,
     pub overview: Option<String>,
     pub poster_path: Option<String>,
+    pub rating: Option<Rating>,
 }
 
 /// A Show as TMDB's search lists it.
@@ -304,6 +327,10 @@ struct MovieJson {
     poster_path: Option<String>,
     #[serde(default)]
     imdb_id: Option<String>,
+    #[serde(default)]
+    vote_average: Option<f64>,
+    #[serde(default)]
+    vote_count: Option<i64>,
 }
 
 /// `"1999-03-30"` → 1999; TMDB sends `""` when there is no date.
@@ -396,6 +423,7 @@ impl From<MovieJson> for MovieDetails {
             imdb_id: non_empty(m.imdb_id),
             overview: non_empty(m.overview),
             poster_path: non_empty(m.poster_path),
+            rating: Rating::from_votes(m.vote_average, m.vote_count),
         }
     }
 }

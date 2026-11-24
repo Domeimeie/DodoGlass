@@ -152,6 +152,7 @@ impl Catalogue {
     /// Match unless it has one.
     pub async fn attach_to_new_movie(&self, id: &str, found: MovieMatch) -> Result<Attached> {
         let id = id.to_string();
+        let now = self.clock.now_ms();
         self.db
             .run(move |conn| {
                 conn.transaction(|conn| {
@@ -166,7 +167,7 @@ impl Catalogue {
                         .first(conn)
                         .optional()?;
                     if state != Some(MatchState::Matched) {
-                        apply_movie_match(conn, movie_id, found)?;
+                        apply_movie_match(conn, movie_id, found, now)?;
                     }
                     attached(media_files::attach(conn, &id, Owner::Movie(movie_id))?)
                 })

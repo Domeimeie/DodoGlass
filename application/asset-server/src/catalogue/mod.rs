@@ -13,6 +13,8 @@
 //!   and Locked fields of Movies;
 //! - [`show_metadata`]: the same for Shows, and their Seasons and Episodes
 //!   looked up by number;
+//! - [`ratings`]: Ratings (TMDB's user score), never locked and kept
+//!   current by the rating sweep (ADR 0005);
 //! - [`corrections`]: the admin's metadata corrections: fields edited by
 //!   hand (Locked fields), and the entries a picked Match or a refresh
 //!   applies to;
@@ -26,6 +28,7 @@ mod media_files;
 mod metadata;
 mod movies;
 mod placement;
+mod ratings;
 pub(crate) mod schema;
 mod show_metadata;
 mod shows;
@@ -48,6 +51,7 @@ pub use metadata::{
     NeedsReviewMovie,
 };
 pub use movies::{MediaFileView, MovieView};
+pub use ratings::{RATING_FIELDS, RatingView};
 pub use show_metadata::{
     EPISODE_LOCKABLE_FIELDS, EpisodeMatch, NeedsReviewShow, Part, PartLookupDue,
     SEASON_LOCKABLE_FIELDS, SHOW_LOCKABLE_FIELDS, SeasonMatch, ShowMatch, ShowMetadataView,

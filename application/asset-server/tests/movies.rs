@@ -23,6 +23,9 @@ async fn a_movie_upload_is_listed_once_its_transcode_is_ready() {
             "id": 1,
             "name": "The Matrix",
             "year": 1999,
+            "rating": null,
+            "votes": null,
+            "rating_updated_at": null,
             "media_files": [{
                 "id": MATRIX_ID,
                 "label": "matrix",
@@ -119,6 +122,9 @@ async fn nfc_and_nfd_spellings_of_a_path_are_the_same_movie() {
             "id": 1,
             "name": "Am\u{e9}lie",
             "year": 2001,
+            "rating": null,
+            "votes": null,
+            "rating_updated_at": null,
             "media_files": [{
                 "id": "movies_Am_lie__2001__amelie-7657ef7e",
                 "label": "amelie",
