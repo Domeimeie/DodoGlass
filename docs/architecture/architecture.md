@@ -8,7 +8,9 @@ flowchart TB
         subgraph Requests["Request path"]
             API[API backend]
             UserService[User service]
-            LibraryService[Library service]
+        end
+        subgraph Catalogue
+            AssetServer["Asset server<br/>catalogue + metadata"]
         end
         subgraph Streaming
             PlaybackService[Playback service]
@@ -17,39 +19,52 @@ flowchart TB
         end
         subgraph Background["Background jobs"]
             Scheduler[Scheduler]
-            MetadataService[Metadata service]
             APIManager[API manager]
         end
         subgraph Database["Database"]
             UserDB[(user db)]
-            MetadataDB[(metadata db<br/>indexes)]
+            CatalogueDB[(catalogue db<br/>SQLite)]
             SchedulerDB[(tasks)]
         end
     end
-    MediaStorage[(Media storage)]
+    subgraph MediaStorage["Media storage (RustFS)"]
+        Ingest[(ingest)]
+        Final[(final)]
+        Assets[(assets<br/>posters, stills)]
+    end
+    Broker{{"MQTT broker<br/>(Mosquitto)"}}
     subgraph Indexing["API Components (indexing)"]
-        MovieDB[movieDB]
+        TMDB[TMDB]
         MusicBrainz[MusicBrainz]
     end
     Web & Mobile --> API
-    API --> UserService & LibraryService
+    API --> UserService & AssetServer
     API -->|play| PlaybackService
     UserService --> UserDB
-    LibraryService -->|read| MetadataDB
-    PlaybackService -->|transcode| Transcoder
-    PlaybackService -->|direct play| MediaStorage
-    Transcoder -->|read media| MediaStorage
-    Transcoder -->|write| TranscodeCache
-    Scheduler -->|enrich| MetadataService
+    Ingest -.->|upload events| Broker
+    Broker -->|tasks| Transcoder
+    Broker -->|uploads, status| AssetServer
+    Transcoder -->|read| Ingest
+    Transcoder -->|HLS + DASH| Final
+    Transcoder -.->|status| Broker
+    AssetServer -->|read / write| CatalogueDB
+    AssetServer -->|reconcile| Final
+    AssetServer -->|images| Assets
+    AssetServer -->|match| TMDB
+    PlaybackService -->|stream| Final
+    PlaybackService -->|transcode on demand| TranscodeCache
+    Scheduler -.->|refresh, later| AssetServer
     Scheduler --> SchedulerDB
-    Scheduler -->|scan| MediaStorage
-    MetadataService -->|write| MetadataDB
-    MetadataService -->|fetch| APIManager
-    APIManager --> MovieDB & MusicBrainz
-    TranscodeCache ~~~ MediaStorage
-    TranscodeCache ~~~ MovieDB
+    Scheduler -->|fetch| APIManager
+    APIManager --> MusicBrainz
+
+    classDef built fill:#d8f0d8,stroke:#2e7d32,color:#1b3d1b
+    class AssetServer,Transcoder,Ingest,Final,Assets,Broker,CatalogueDB,TMDB built
 ```
 
-**Media storage** is S3-compatible object storage (RustFS); new uploads reach the Transcoder as
-events over an MQTT broker (Mosquitto). See [Infrastructure](infrastructure.md), and
+Green parts are built; the rest is planned. The **Asset server** combines the planned Library and
+Metadata services (see [Asset server](asset-server.md)).
+
+**Media storage** is S3-compatible object storage (RustFS); new uploads reach the Transcoder and the
+Asset server as events over an MQTT broker (Mosquitto). See [Infrastructure](infrastructure.md), and
 [Setup](setup.md) for a development environment.

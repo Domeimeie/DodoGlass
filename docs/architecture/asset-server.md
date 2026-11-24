@@ -252,8 +252,8 @@ stateDiagram-v2
   that disappears for any other reason makes it **Missing**, never deleted.
 - A Movie or Episode without a Ready Media file is **Hidden**, not deleted, so a re-upload comes back
   with its fixes. Shows and Seasons are hidden when none of their Episodes are visible.
-- One Media file per Movie or Episode is the **Default media file**. When it goes away, the oldest
-  remaining Ready one takes over.
+- One Media file per Movie or Episode is the **Default media file**. When it is removed or becomes
+  Missing or Failed, the oldest remaining Ready one takes over.
 - **Labels** are unique per Movie or Episode: `matrix.mkv` and `matrix.mp4` become "matrix" and
   "matrix (mp4)". An admin can rename them.
 
