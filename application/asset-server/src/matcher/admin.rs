@@ -6,7 +6,7 @@
 use anyhow::Result;
 use serde::Deserialize;
 
-use super::{LookupError, Matcher};
+use super::{LookupError, Matcher, Seasons};
 use crate::catalogue::{Attached, Entry, PartRefresh};
 
 /// A new Movie or Episode an admin attaches an Unassigned media file to,
@@ -172,9 +172,10 @@ impl Matcher {
     /// rather than waiting for the next pass. TMDB failing for one of them
     /// leaves it to be retried, as in a pass.
     async fn look_up_parts_of(&self, show_id: i32) -> Result<()> {
+        let mut seasons = Seasons::default();
         for due in self.catalogue.part_lookups_due().await? {
             if due.show_id == show_id {
-                self.look_up_part(due).await?;
+                self.look_up_part(due, &mut seasons).await?;
             }
         }
         Ok(())

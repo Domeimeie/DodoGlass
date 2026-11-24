@@ -21,6 +21,7 @@
 //! matched in a pass has its Seasons and Episodes filled in by the same
 //! pass). `main` runs one every few seconds, tests call it explicitly.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,7 +39,7 @@ use crate::catalogue::{
     Candidate, Catalogue, EpisodeMatch, LookupDue, MovieMatch, Part, PartLookupDue, SeasonMatch,
     ShowMatch,
 };
-use crate::ports::tmdb::{MovieSummary, ShowSummary, Tmdb, TmdbError};
+use crate::ports::tmdb::{MovieSummary, Rating, SeasonDetails, ShowSummary, Tmdb, TmdbError};
 
 /// How many search results a Movie in Needs review keeps.
 pub const CANDIDATES: usize = 5;
@@ -55,6 +56,44 @@ pub struct Matcher {
     catalogue: Catalogue,
     tmdb: Arc<dyn Tmdb>,
     assets: Arc<dyn ObjectStore>,
+}
+
+/// The details of the Seasons fetched in one pass, by TMDB Show id and
+/// number (`None`: TMDB does not know it, or refused): a Season and its
+/// Episodes share one request, which also gives the Episodes their Ratings.
+#[derive(Default)]
+struct Seasons(HashMap<(i64, i32), Option<SeasonDetails>>);
+
+impl Seasons {
+    async fn get(
+        &mut self,
+        tmdb: &dyn Tmdb,
+        show_tmdb_id: i64,
+        number: i32,
+    ) -> Result<Option<&SeasonDetails>, LookupError> {
+        let key = (show_tmdb_id, number);
+        if !self.0.contains_key(&key) {
+            let details = match tmdb.season(show_tmdb_id, number).await {
+                Ok(details) => details,
+                Err(TmdbError::Rejected(e)) => {
+                    warn!(show_tmdb_id, season = number, error = %e, "season refused");
+                    None
+                }
+                Err(e) => return Err(e.into()),
+            };
+            self.0.insert(key, details);
+        }
+        Ok(self.0[&key].as_ref())
+    }
+}
+
+/// The Rating of Episode `number`, as its Season's details list it.
+fn episode_rating(season: Option<&SeasonDetails>, number: i32) -> Option<Rating> {
+    season?
+        .episodes
+        .iter()
+        .find(|e| e.number == number)
+        .and_then(|e| e.rating)
 }
 
 /// What one lookup came to.
@@ -117,8 +156,9 @@ impl Matcher {
         for lookup in self.catalogue.show_lookups_due().await? {
             self.look_up_show(lookup).await?;
         }
+        let mut seasons = Seasons::default();
         for due in self.catalogue.part_lookups_due().await? {
-            self.look_up_part(due).await?;
+            self.look_up_part(due, &mut seasons).await?;
         }
         Ok(())
     }
@@ -240,23 +280,26 @@ impl Matcher {
             imdb_id: details.imdb_id,
             description: details.overview,
             image_key,
+            rating: details.rating,
         })
     }
 
     /// Looks a Season or Episode of a matched Show up by number. TMDB not
     /// knowing it, or refusing, leaves its number as its name: it never
     /// goes to Needs review.
-    async fn look_up_part(&self, due: PartLookupDue) -> Result<()> {
+    async fn look_up_part(&self, due: PartLookupDue, seasons: &mut Seasons) -> Result<()> {
         let part = due.part;
         let outcome = match part {
-            Part::Season { season_id } => match self.find_season(&due).await {
+            Part::Season { season_id } => match self.find_season(&due, seasons).await {
                 Ok(found) => return self.catalogue.season_looked_up(season_id, found).await,
                 Err(e) => e,
             },
-            Part::Episode { episode_id, number } => match self.find_episode(&due, number).await {
-                Ok(found) => return self.catalogue.episode_looked_up(episode_id, found).await,
-                Err(e) => e,
-            },
+            Part::Episode { episode_id, number } => {
+                match self.find_episode(&due, number, seasons).await {
+                    Ok(found) => return self.catalogue.episode_looked_up(episode_id, found).await,
+                    Err(e) => e,
+                }
+            }
         };
         let refused = match outcome {
             LookupError::Retry(e) => {
@@ -279,8 +322,16 @@ impl Matcher {
         }
     }
 
-    async fn find_season(&self, p: &PartLookupDue) -> Result<Option<SeasonMatch>, LookupError> {
-        let Some(season) = self.tmdb.season(p.show_tmdb_id, p.season).await? else {
+    async fn find_season(
+        &self,
+        p: &PartLookupDue,
+        seasons: &mut Seasons,
+    ) -> Result<Option<SeasonMatch>, LookupError> {
+        let Some(season) = seasons
+            .get(self.tmdb.as_ref(), p.show_tmdb_id, p.season)
+            .await?
+            .cloned()
+        else {
             return Ok(None);
         };
         Ok(Some(SeasonMatch {
@@ -290,15 +341,22 @@ impl Matcher {
         }))
     }
 
+    /// The Episode's own details, and its Rating from its Season's.
     async fn find_episode(
         &self,
         p: &PartLookupDue,
         number: i32,
+        seasons: &mut Seasons,
     ) -> Result<Option<EpisodeMatch>, LookupError> {
         let Some(episode) = self.tmdb.episode(p.show_tmdb_id, p.season, number).await? else {
             return Ok(None);
         };
+        let season = seasons
+            .get(self.tmdb.as_ref(), p.show_tmdb_id, p.season)
+            .await?;
+        let rating = episode_rating(season, number);
         Ok(Some(EpisodeMatch {
+            rating,
             tmdb_id: episode.tmdb_id,
             name: episode.name,
             description: episode.overview,

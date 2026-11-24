@@ -81,6 +81,7 @@ pub struct ShowDetails {
     pub imdb_id: Option<String>,
     pub overview: Option<String>,
     pub poster_path: Option<String>,
+    pub rating: Option<Rating>,
 }
 
 /// A Season with everything the catalogue takes from TMDB.
@@ -89,6 +90,16 @@ pub struct SeasonDetails {
     pub name: Option<String>,
     pub overview: Option<String>,
     pub poster_path: Option<String>,
+    /// The Rating of each of its Episodes TMDB lists: Episodes get their
+    /// Rating from here, not from a request of their own.
+    pub episodes: Vec<EpisodeRating>,
+}
+
+/// An Episode's Rating, as its Season's details list it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpisodeRating {
+    pub number: i32,
+    pub rating: Option<Rating>,
 }
 
 /// An Episode with everything the catalogue takes from TMDB.
@@ -361,6 +372,10 @@ struct ShowJson {
     /// Only with `append_to_response=external_ids`.
     #[serde(default)]
     external_ids: Option<ExternalIdsJson>,
+    #[serde(default)]
+    vote_average: Option<f64>,
+    #[serde(default)]
+    vote_count: Option<i64>,
 }
 
 impl From<ShowJson> for ShowDetails {
@@ -372,6 +387,7 @@ impl From<ShowJson> for ShowDetails {
             imdb_id: non_empty(s.external_ids.unwrap_or_default().imdb_id),
             overview: non_empty(s.overview),
             poster_path: non_empty(s.poster_path),
+            rating: Rating::from_votes(s.vote_average, s.vote_count),
         }
     }
 }
@@ -384,6 +400,36 @@ struct SeasonJson {
     overview: Option<String>,
     #[serde(default)]
     poster_path: Option<String>,
+    #[serde(default)]
+    episodes: Vec<SeasonEpisodeJson>,
+}
+
+/// An Episode in a Season's details (only what the catalogue takes there).
+#[derive(Deserialize)]
+struct SeasonEpisodeJson {
+    episode_number: i32,
+    #[serde(default)]
+    vote_average: Option<f64>,
+    #[serde(default)]
+    vote_count: Option<i64>,
+}
+
+impl From<SeasonJson> for SeasonDetails {
+    fn from(s: SeasonJson) -> Self {
+        SeasonDetails {
+            name: non_empty(s.name),
+            overview: non_empty(s.overview),
+            poster_path: non_empty(s.poster_path),
+            episodes: s
+                .episodes
+                .into_iter()
+                .map(|e| EpisodeRating {
+                    number: e.episode_number,
+                    rating: Rating::from_votes(e.vote_average, e.vote_count),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -501,11 +547,7 @@ impl Tmdb for TmdbClient {
         let season: Option<SeasonJson> = self
             .get_json_found(&format!("/tv/{tv_id}/season/{number}"), &[])
             .await?;
-        Ok(season.map(|s| SeasonDetails {
-            name: non_empty(s.name),
-            overview: non_empty(s.overview),
-            poster_path: non_empty(s.poster_path),
-        }))
+        Ok(season.map(SeasonDetails::from))
     }
 
     async fn episode(
@@ -558,6 +600,41 @@ mod tests {
         assert_eq!(episode.imdb_id.as_deref(), Some("tt1054724"));
         assert_eq!(episode.air_date.as_deref(), Some("2008-01-27"));
         assert_eq!(episode.still_path, None);
+    }
+
+    #[test]
+    fn ratings_come_from_vote_average_and_count() {
+        let movie =
+            r#"{"id": 603, "title": "The Matrix", "vote_average": 8.2, "vote_count": 26000}"#;
+        let movie = MovieDetails::from(serde_json::from_str::<MovieJson>(movie).unwrap());
+        assert_eq!(
+            movie.rating,
+            Some(Rating {
+                score: 8.2,
+                votes: 26000
+            })
+        );
+
+        let season = r#"{"name": "Season 1", "episodes": [
+            {"episode_number": 1, "vote_average": 7.9, "vote_count": 101},
+            {"episode_number": 2, "vote_average": 0.0, "vote_count": 0}]}"#;
+        let season = SeasonDetails::from(serde_json::from_str::<SeasonJson>(season).unwrap());
+        assert_eq!(
+            season.episodes,
+            [
+                EpisodeRating {
+                    number: 1,
+                    rating: Some(Rating {
+                        score: 7.9,
+                        votes: 101
+                    })
+                },
+                EpisodeRating {
+                    number: 2,
+                    rating: None
+                },
+            ]
+        );
     }
 
     #[test]

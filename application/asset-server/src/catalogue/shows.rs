@@ -12,6 +12,7 @@ use serde::Serialize;
 use super::Catalogue;
 use super::media_files::{Manifests, READY};
 use super::movies::MediaFileView;
+use super::ratings::RatingView;
 use super::schema::{episode, media_file, season, show};
 use super::show_metadata::{self, ShowMetadataView};
 
@@ -54,6 +55,8 @@ pub struct EpisodeView {
     /// ISO date, `2008-01-27`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub air_date: Option<String>,
+    #[serde(flatten)]
+    pub rating: RatingView,
     pub media_files: Vec<MediaFileView>,
 }
 
@@ -319,6 +322,15 @@ impl Catalogue {
                                 description: field(|m| &m.description),
                                 image: field(|m| &m.image_key).or_else(|| season_image.clone()),
                                 air_date: field(|m| &m.air_date),
+                                rating: m
+                                    .map(|m| {
+                                        RatingView::from_columns(
+                                            m.rating,
+                                            m.votes,
+                                            m.rating_updated_ms,
+                                        )
+                                    })
+                                    .unwrap_or_default(),
                                 media_files: Vec::new(),
                             },
                         ));
